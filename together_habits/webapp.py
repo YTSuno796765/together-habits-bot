@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import time
 from html import escape
 from datetime import date, datetime, timedelta
@@ -22,9 +23,9 @@ from zoneinfo import ZoneInfo
 from aiohttp import web
 
 from together_habits import logic
-from together_habits.db import Habit, Pair, PairError, Storage
+from together_habits.db import Habit, Pair, PairError, Plan, Storage
 from together_habits.handlers import Handlers
-from together_habits.texts import AVOID_TEMPLATES, SCOPE_KIND, SCOPES, TEMPLATES
+from together_habits.texts import AVOID_TEMPLATES, KIND_SCOPE, SCOPE_KIND, SCOPES, TEMPLATES
 
 log = logging.getLogger(__name__)
 
@@ -98,6 +99,10 @@ class WebApi:
         app.router.add_delete("/api/habits/{habit_id:\\d+}", self._delete_habit)
         app.router.add_post("/api/habits/{habit_id:\\d+}/pin", self._pin_habit)
         app.router.add_post("/api/order", self._order)
+        app.router.add_get("/api/plans", self._plans)
+        app.router.add_post("/api/plans", self._add_plan)
+        app.router.add_post("/api/plans/{plan_id:\\d+}/respond", self._respond_plan)
+        app.router.add_delete("/api/plans/{plan_id:\\d+}", self._cancel_plan)
         app.router.add_post("/api/invite", self._invite)
         app.router.add_post("/api/mood", self._mood)
         return app
@@ -416,6 +421,126 @@ class WebApi:
         if len(ids) != len(set(ids)) or set(ids) != known or not set(pinned) <= known:
             raise ApiError("Список привычек изменился — обнови страницу", 409)
         self.db.reorder(ids, set(pinned))
+        return web.json_response({"ok": True})
+
+    # ---- plans -----------------------------------------------------------------
+
+    def _plan_payload(self, plan: Plan, user_id: int, pairs: dict[int, Pair]) -> dict[str, Any]:
+        pair = pairs[plan.pair_id]
+        partner_id = pair.other(user_id)
+        return {
+            "id": plan.id,
+            "scope": KIND_SCOPE[pair.kind],
+            "title": plan.title,
+            "emoji": plan.emoji,
+            "date": plan.day.isoformat(),
+            "time": plan.time,
+            "note": plan.note,
+            "status": plan.status,
+            "mine": plan.author_id == user_id,
+            "partner": self.db.user_name(partner_id) if partner_id else None,
+        }
+
+    async def _plans(self, request: web.Request) -> web.Response:
+        user_id = request["user_id"]
+        today = self.today()
+        month = request.query.get("month", today.strftime("%Y-%m"))
+        if not re.fullmatch(r"\d{4}-\d{2}", month):
+            raise ApiError("Некорректный месяц")
+        year, mon = map(int, month.split("-"))
+        if not 1 <= mon <= 12:
+            raise ApiError("Некорректный месяц")
+        first = date(year, mon, 1)
+        last = date(year + mon // 12, mon % 12 + 1, 1) - timedelta(days=1)
+
+        pairs = {s: self._pair_for(user_id, s) for s in ("f", "c")}
+        by_id = {p.id: p for p in pairs.values() if p is not None}
+        # Show a whole 6-week grid around the month, plus everything upcoming.
+        grid_start = first - timedelta(days=first.weekday())
+        plans = self.db.plans_for_user(user_id, grid_start, grid_start + timedelta(days=41))
+        upcoming = [
+            p for p in self.db.plans_for_user(user_id, today, today + timedelta(days=365))
+            if p.status != "declined"
+        ][:20]
+        incoming = [
+            p for p in self.db.plans_for_user(user_id, today)
+            if p.status == "pending" and p.author_id != user_id
+        ]
+        return web.json_response(
+            {
+                "today": today.isoformat(),
+                "month": month,
+                "pairs": {
+                    s: {
+                        "status": self._pair_status(p),
+                        "partner": self.db.user_name(p.other(user_id))
+                        if p is not None and p.is_complete
+                        else None,
+                    }
+                    for s, p in pairs.items()
+                },
+                "plans": [self._plan_payload(p, user_id, by_id) for p in plans],
+                "upcoming": [self._plan_payload(p, user_id, by_id) for p in upcoming],
+                "incoming": [self._plan_payload(p, user_id, by_id) for p in incoming],
+            }
+        )
+
+    async def _add_plan(self, request: web.Request) -> web.Response:
+        user_id = request["user_id"]
+        data = await self._json(request)
+        scope = self._scope(data.get("scope"))
+        if scope == "p":
+            raise ApiError("Планировать можно с другом или парой")
+        pair, _ = self._active_view(user_id, scope)
+        assert pair is not None
+        try:
+            day = date.fromisoformat(str(data.get("date", "")))
+        except ValueError as exc:
+            raise ApiError("Выбери дату") from exc
+        today = self.today()
+        if not today <= day <= today + timedelta(days=366):
+            raise ApiError("Дата должна быть от сегодня и до года вперёд")
+        time_value = data.get("time") or None
+        if time_value is not None and not (
+            isinstance(time_value, str) and re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", time_value)
+        ):
+            raise ApiError("Время в формате ЧЧ:ММ")
+        try:
+            plan = self.db.add_plan(
+                pair.id,
+                user_id,
+                str(data.get("title", "")),
+                day,
+                emoji=str(data.get("emoji", "📅")),
+                time=time_value,
+                note=str(data.get("note", "") or ""),
+            )
+        except ValueError as exc:
+            raise ApiError("Напиши, что предлагаешь") from exc
+        if self.bot is not None:
+            await self.handlers.notify_plan_proposed(self.bot, plan)
+        return web.json_response({"id": plan.id})
+
+    async def _respond_plan(self, request: web.Request) -> web.Response:
+        data = await self._json(request)
+        accept = data.get("accept")
+        if not isinstance(accept, bool):
+            raise ApiError("Некорректный запрос")
+        try:
+            plan = await self.handlers.respond_plan(
+                self.bot, int(request.match_info["plan_id"]), request["user_id"], accept
+            )
+        except PairError as exc:
+            raise ApiError(str(exc)) from exc
+        return web.json_response({"status": plan.status})
+
+    async def _cancel_plan(self, request: web.Request) -> web.Response:
+        try:
+            await self.handlers.cancel_plan(
+                self.bot, int(request.match_info["plan_id"]), request["user_id"]
+            )
+        except PairError as exc:
+            raise ApiError(str(exc), 404) from exc
         return web.json_response({"ok": True})
 
     async def _invite(self, request: web.Request) -> web.Response:

@@ -182,3 +182,22 @@ def test_avoid_habit_in_bot_list(hx):
     assert hx.h.pending_count(1, today) == 0
     stats = hx.press(1, "stats:p")
     assert "Без срыва: 0" in stats.edits[-1][0]
+
+
+def test_plan_buttons_in_bot(hx):
+    from datetime import date, timedelta
+
+    pair_up(hx, "c")
+    pair = hx.db.get_pair(1, "couple")
+    plan = hx.db.add_plan(pair.id, 1, "Ужин", date.today() + timedelta(days=2), emoji="🍽", time="19:00")
+    asyncio.run(hx.h.notify_plan_proposed(hx.bot, plan))
+    assert hx.bot.sent[-1][0] == 2 and "Ужин" in hx.bot.sent[-1][1]
+
+    own = hx.press(1, f"plan:{plan.id}:y")
+    assert "твоё предложение" in own.edits[-1][0]
+    answer = hx.press(2, f"plan:{plan.id}:y")
+    assert "принимаешь" in answer.edits[-1][0]
+    assert hx.db.get_plan(plan.id).status == "accepted"
+    assert hx.bot.sent[-1][0] == 1 and "принят" in hx.bot.sent[-1][1]
+    again = hx.press(2, f"plan:{plan.id}:n")
+    assert "уже ответили" in again.edits[-1][0]

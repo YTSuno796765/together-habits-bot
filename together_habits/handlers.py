@@ -16,7 +16,7 @@ from telegram.ext import ContextTypes
 
 from together_habits import keyboards as kb
 from together_habits import logic
-from together_habits.db import Habit, Pair, PairError, Storage
+from together_habits.db import Habit, Pair, PairError, Plan, Storage
 from together_habits.texts import (
     HELP,
     KIND_SCOPE,
@@ -178,6 +178,10 @@ class Handlers:
             await self._mood_prompt(update, user_id)
         elif action == "moodset" and arg.isdigit():
             await self._set_mood(update, context, user_id, int(arg))
+        elif action == "plan":
+            plan_id, _, answer = arg.partition(":")
+            if plan_id.isdigit() and answer in {"y", "n"}:
+                await self._plan_answer(update, context, user_id, int(plan_id), answer == "y")
         elif action == "rem":
             await self._reminders(update, user_id)
         elif action == "remset":
@@ -525,6 +529,81 @@ class Handlers:
                 text += "\n\nКажется, у вас сегодня разное настроение. Может, поговорить? 💬"
         await self._notify(context, partner_id, f"💭 {self._name(user_id)} сегодня: {emoji}")
         await self._show(update, text, kb.mode_menu("c"))
+
+    # ---- plans -------------------------------------------------------------
+
+    def plan_scope_title(self, plan: Plan) -> str:
+        pair = self.db.get_pair_by_id(plan.pair_id)
+        return "🤝 С другом" if pair and pair.kind == "friend" else "💞 Для пары"
+
+    def plan_card(self, plan: Plan) -> str:
+        lines = [
+            f"{plan.emoji} <b>{escape(plan.title)}</b>",
+            f"🗓 {logic.human_date(plan.day, plan.time)}",
+        ]
+        if plan.note:
+            lines.append(f"💬 {escape(plan.note)}")
+        return "\n".join(lines)
+
+    async def notify_plan_proposed(self, bot: Any, plan: Plan) -> None:
+        pair = self.db.get_pair_by_id(plan.pair_id)
+        partner_id = pair.other(plan.author_id) if pair else None
+        if partner_id is None:
+            return
+        text = (
+            f"📅 <b>{self._name(plan.author_id)}</b> предлагает ({self.plan_scope_title(plan)}):\n\n"
+            f"{self.plan_card(plan)}"
+        )
+        await self.send(bot, partner_id, text, kb.plan_answer(plan.id, self.webapp_url))
+
+    async def respond_plan(self, bot: Any, plan_id: int, user_id: int, accept: bool) -> Plan:
+        """Accept or decline a pending plan proposed by the partner. Raises PairError."""
+        plan = self.db.get_plan(plan_id)
+        pair = self.db.get_pair_by_id(plan.pair_id) if plan else None
+        if plan is None or pair is None or user_id not in pair.members:
+            raise PairError("План не найден или уже отменён.")
+        if plan.author_id == user_id:
+            raise PairError("Это твоё предложение — ответить должен второй участник.")
+        if plan.status != "pending":
+            raise PairError("На это предложение уже ответили.")
+        status = "accepted" if accept else "declined"
+        self.db.set_plan_status(plan.id, status)
+        verdict = "✅ План принят" if accept else "❌ План отклонён"
+        await self.send(
+            bot,
+            plan.author_id,
+            f"{verdict} — {self._name(user_id)}:\n\n{self.plan_card(plan)}",
+        )
+        updated = self.db.get_plan(plan.id)
+        assert updated is not None
+        return updated
+
+    async def cancel_plan(self, bot: Any, plan_id: int, user_id: int) -> None:
+        plan = self.db.get_plan(plan_id)
+        pair = self.db.get_pair_by_id(plan.pair_id) if plan else None
+        if plan is None or pair is None or plan.author_id != user_id:
+            raise PairError("Отменить можно только своё предложение.")
+        self.db.delete_plan(plan.id)
+        partner_id = pair.other(user_id)
+        if partner_id is not None and plan.status != "declined":
+            await self.send(
+                bot, partner_id, f"🚫 {self._name(user_id)} отменяет план:\n\n{self.plan_card(plan)}"
+            )
+
+    async def _plan_answer(
+        self, update: Update, context: Context, user_id: int, plan_id: int, accept: bool
+    ) -> None:
+        try:
+            plan = await self.respond_plan(context.bot, plan_id, user_id, accept)
+        except PairError as exc:
+            await self._show(update, "😕 " + escape(str(exc)), kb.main_menu(self.webapp_url))
+            return
+        result = "✅ Ты принимаешь этот план" if plan.status == "accepted" else "❌ Ты отклоняешь этот план"
+        await self._show(
+            update,
+            f"📅 Предложение от <b>{self._name(plan.author_id)}</b>:\n\n{self.plan_card(plan)}\n\n{result}",
+            kb.main_menu(self.webapp_url),
+        )
 
     # ---- reminders ---------------------------------------------------------
 

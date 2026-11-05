@@ -49,6 +49,19 @@ CREATE TABLE IF NOT EXISTS checkins (
     day TEXT NOT NULL,
     PRIMARY KEY (habit_id, user_id, day)
 );
+CREATE TABLE IF NOT EXISTS plans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,
+    author_id INTEGER NOT NULL REFERENCES users(id),
+    title TEXT NOT NULL,
+    emoji TEXT NOT NULL,
+    day TEXT NOT NULL,
+    time TEXT,
+    note TEXT,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'declined')),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS plans_pair_day ON plans (pair_id, day);
 CREATE TABLE IF NOT EXISTS moods (
     pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,
     user_id INTEGER NOT NULL REFERENCES users(id),
@@ -102,6 +115,22 @@ class Habit:
     @property
     def is_avoid(self) -> bool:
         return self.kind == "avoid"
+
+
+@dataclass(frozen=True)
+class Plan:
+    id: int
+    pair_id: int
+    author_id: int
+    title: str
+    emoji: str
+    day: date
+    time: str | None
+    note: str | None
+    status: str
+
+
+PLAN_STATUSES = ("pending", "accepted", "declined")
 
 
 class Storage:
@@ -371,3 +400,76 @@ class Storage:
         for row in rows:
             result.setdefault(date.fromisoformat(row["day"]), {})[row["user_id"]] = row["score"]
         return result
+
+    # ---- plans -------------------------------------------------------------
+
+    @staticmethod
+    def _plan(row: sqlite3.Row) -> Plan:
+        return Plan(
+            row["id"],
+            row["pair_id"],
+            row["author_id"],
+            row["title"],
+            row["emoji"],
+            date.fromisoformat(row["day"]),
+            row["time"],
+            row["note"],
+            row["status"],
+        )
+
+    def add_plan(
+        self,
+        pair_id: int,
+        author_id: int,
+        title: str,
+        day: date,
+        *,
+        emoji: str = "📅",
+        time: str | None = None,
+        note: str | None = None,
+    ) -> Plan:
+        title = title.strip()[:60]
+        if not title:
+            raise ValueError("plan title is empty")
+        note = (note or "").strip()[:200] or None
+        cur = self.conn.execute(
+            "INSERT INTO plans (pair_id, author_id, title, emoji, day, time, note) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (pair_id, author_id, title, emoji.strip()[:8] or "📅", day.isoformat(), time, note),
+        )
+        self.conn.commit()
+        plan = self.get_plan(cur.lastrowid)
+        assert plan is not None
+        return plan
+
+    def get_plan(self, plan_id: int) -> Plan | None:
+        row = self.conn.execute("SELECT * FROM plans WHERE id = ?", (plan_id,)).fetchone()
+        return self._plan(row) if row else None
+
+    def plans_for_user(
+        self, user_id: int, start: date | None = None, end: date | None = None
+    ) -> list[Plan]:
+        """Plans in all of the user's pairs, optionally limited to [start, end]."""
+        query = (
+            "SELECT plans.* FROM plans JOIN pairs ON pairs.id = plans.pair_id "
+            "WHERE (pairs.owner_id = ? OR pairs.partner_id = ?)"
+        )
+        args: list[object] = [user_id, user_id]
+        if start is not None:
+            query += " AND plans.day >= ?"
+            args.append(start.isoformat())
+        if end is not None:
+            query += " AND plans.day <= ?"
+            args.append(end.isoformat())
+        query += " ORDER BY plans.day, COALESCE(plans.time, '99:99'), plans.id"
+        return [self._plan(row) for row in self.conn.execute(query, args)]
+
+    def set_plan_status(self, plan_id: int, status: str) -> None:
+        if status not in PLAN_STATUSES:
+            raise ValueError(f"unknown plan status: {status}")
+        self.conn.execute("UPDATE plans SET status = ? WHERE id = ?", (status, plan_id))
+        self.conn.commit()
+
+    def delete_plan(self, plan_id: int) -> None:
+        self.conn.execute("DELETE FROM plans WHERE id = ?", (plan_id,))
+        self.conn.commit()

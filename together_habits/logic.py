@@ -11,6 +11,18 @@ WEEKDAYS_SHORT = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
 ONE_DAY = timedelta(days=1)
 
 
+MONTHS_GENITIVE = (
+    "января", "февраля", "марта", "апреля", "мая", "июня",
+    "июля", "августа", "сентября", "октября", "ноября", "декабря",
+)
+
+
+def human_date(day: date, time: str | None = None) -> str:
+    """'пт, 14 ноября · 19:00'."""
+    text = f"{WEEKDAYS_SHORT[day.weekday()]}, {day.day} {MONTHS_GENITIVE[day.month - 1]}"
+    return f"{text} · {time}" if time else text
+
+
 def is_scheduled(schedule: int, day: date) -> bool:
     return bool(schedule >> day.weekday() & 1)
 

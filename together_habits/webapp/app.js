@@ -10,7 +10,15 @@
     { id: "p", tab: "Личные", title: "Мои привычки" },
     { id: "f", tab: "С другом", title: "С другом" },
     { id: "c", tab: "Пара", title: "Для пары" },
+    { id: "plan", tab: "Планы", title: "Планы" },
   ];
+  const MONTHS = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"];
+  const MONTHS_GEN = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"];
+  const PLAN_EMOJIS = ["📅", "🍽", "☕", "🎬", "🚶", "🏃", "🏋️", "🏀", "⚽", "🎮", "🍺", "🎉", "✈️", "🏕", "🛍", "🎤", "📚", "🧘", "🏖", "❤️"];
+  const PLAN_TEMPLATES = {
+    f: [["🏋️", "Зал вместе"], ["🎮", "Поиграть"], ["🍺", "Посидеть в баре"], ["🎬", "Кино"], ["⚽", "Футбол"], ["🍔", "Поесть бургеров"]],
+    c: [["🍽", "Ужин"], ["🎬", "Кино"], ["🚶", "Прогулка"], ["☕", "Кофе"], ["✈️", "Поездка"], ["🏠", "Вечер дома"]],
+  };
   const MOODS = { 1: "😞", 2: "😕", 3: "😐", 4: "🙂", 5: "😄" };
   const WEEKDAYS = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"];
   const EMOJIS = ["⭐", "🏃", "🏋️", "📖", "🧘", "💧", "🥗", "😴", "💰", "🎯", "📝", "🇬🇧", "🚭", "📵", "🚶", "🤗",
@@ -84,7 +92,7 @@
   function loadScope() {
     try {
       const saved = localStorage.getItem("habits.scope");
-      if (saved === "p" || saved === "f" || saved === "c") return saved;
+      if (["p", "f", "c", "plan"].includes(saved)) return saved;
     } catch (_) { /* storage unavailable */ }
     return "p";
   }
@@ -107,6 +115,12 @@
 
   // ---------- data ----------
   async function loadState() {
+    if (state.scope === "plan") {
+      if (!state.month) state.month = new Date().toISOString().slice(0, 7);
+      state.plans = await api("/api/plans?month=" + state.month);
+      if (!state.selectedDay) state.selectedDay = state.plans.today;
+      return;
+    }
     state.data = await api("/api/state?scope=" + state.scope);
   }
   async function loadStats() {
@@ -137,6 +151,7 @@
   function render() {
     syncBackButton();
     if (state.view === "stats") return renderStats();
+    if (state.scope === "plan") return renderPlans();
     const d = state.data;
     const scopeInfo = SCOPES.find((s) => s.id === state.scope);
     const pairActive = !d.pair || d.pair.status === "active";
@@ -150,14 +165,7 @@
       ),
     );
 
-    const tabs = h("div", { class: "tabs", role: "tablist" },
-      SCOPES.map((s) => h("button", {
-        class: "tab" + (s.id === state.scope ? " active" : ""),
-        role: "tab",
-        "aria-selected": s.id === state.scope ? "true" : "false",
-        onclick: () => switchScope(s.id),
-      }, s.tab)),
-    );
+    const tabs = renderTabs();
 
     const page = [header, h("h1", null, scopeInfo.title)];
     if (d.pair && d.pair.status === "active") {
@@ -173,6 +181,257 @@
       page.push(...renderHabitSections(d));
     }
     app.replaceChildren(h("div", { class: "fade-in" }, page));
+  }
+
+  function renderTabs() {
+    return h("div", { class: "tabs four", role: "tablist" },
+      SCOPES.map((s) => h("button", {
+        class: "tab" + (s.id === state.scope ? " active" : ""),
+        role: "tab",
+        "aria-selected": s.id === state.scope ? "true" : "false",
+        onclick: () => switchScope(s.id),
+      }, s.tab)),
+    );
+  }
+
+  // ---------- render: plans & calendar ----------
+  const isoOf = (d) => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+  const dateOf = (iso) => new Date(iso + "T12:00:00");
+  function dayTitle(iso) {
+    const d = dateOf(iso);
+    return WEEKDAYS[(d.getDay() + 6) % 7] + ", " + d.getDate() + " " + MONTHS_GEN[d.getMonth()];
+  }
+
+  function renderPlans() {
+    const P = state.plans;
+    const activeScopes = ["f", "c"].filter((s) => P.pairs[s].status === "active");
+    const header = h("div", { class: "topbar" },
+      formatDate(P.today),
+      h("div", { class: "actions" },
+        activeScopes.length ? h("button", { class: "icon-btn", "aria-label": "Предложить план", onclick: () => openPlanSheet() }, icon("plus")) : null,
+      ),
+    );
+    const page = [header, h("h1", null, "Планы"),
+      h("p", { class: "subtitle legend-row" },
+        h("span", { class: "lg f" }), "с другом", h("span", { class: "lg c" }), "с парой", h("span", { class: "lg pending" }), "ждёт ответа"),
+      renderTabs()];
+
+    if (!activeScopes.length) {
+      page.push(h("div", { class: "panel hero" },
+        h("div", { class: "big" }, "📅"),
+        h("h2", null, "Планируйте вместе"),
+        h("p", null, "Пригласи друга во вкладке «С другом» или пару во вкладке «Пара» — и сможете предлагать встречи, а всё расписание будет на одном календаре."),
+        h("button", { class: "btn", onclick: () => switchScope("f") }, "Пригласить"),
+      ));
+      app.replaceChildren(h("div", { class: "fade-in" }, page));
+      return;
+    }
+
+    if (P.incoming.length) {
+      page.push(h("div", { class: "section-title" }, "Входящие предложения · " + P.incoming.length),
+        h("div", { class: "plan-list" }, P.incoming.map((x) => planCard(x, true, true))));
+    }
+
+    page.push(renderCalendar(P));
+
+    const dayPlans = P.plans.filter((x) => x.date === state.selectedDay);
+    const canPropose = state.selectedDay >= P.today;
+    page.push(
+      h("div", { class: "section-title row-title" },
+        h("span", null, dayTitle(state.selectedDay)),
+        canPropose ? h("button", { class: "mini-add", onclick: () => openPlanSheet(state.selectedDay) }, "+ предложить") : null),
+      dayPlans.length
+        ? h("div", { class: "plan-list" }, dayPlans.map((x) => planCard(x)))
+        : h("div", { class: "empty-day" }, canPropose ? "Свободный день. Предложи что-нибудь 🙂" : "В этот день планов не было"),
+    );
+
+    const later = P.upcoming.filter((x) => x.date !== state.selectedDay);
+    if (later.length) {
+      page.push(h("div", { class: "section-title" }, "Ближайшие"), h("div", { class: "plan-list" }, later.slice(0, 8).map((x) => planCard(x, false, true))));
+    }
+    app.replaceChildren(h("div", { class: "fade-in" }, page));
+  }
+
+  function renderCalendar(P) {
+    const [year, month] = state.month.split("-").map(Number);
+    const first = new Date(year, month - 1, 1, 12);
+    const start = new Date(first);
+    start.setDate(1 - ((first.getDay() + 6) % 7));
+    const byDay = {};
+    P.plans.forEach((x) => { if (x.status !== "declined") (byDay[x.date] = byDay[x.date] || []).push(x); });
+
+    const cells = [];
+    for (let i = 0; i < 42; i++) {
+      const d = new Date(start);
+      d.setDate(start.getDate() + i);
+      const iso = isoOf(d);
+      const items = byDay[iso] || [];
+      const cls = ["cal-day"];
+      if (d.getMonth() !== month - 1) cls.push("other");
+      if (iso === P.today) cls.push("today");
+      if (iso === state.selectedDay) cls.push("sel");
+      if (iso < P.today) cls.push("past");
+      cells.push(h("button", {
+        class: cls.join(" "),
+        "aria-label": dayTitle(iso) + (items.length ? ", планов: " + items.length : ""),
+        onclick: () => { state.selectedDay = iso; haptic("select"); render(); },
+      },
+        h("span", { class: "num" }, String(d.getDate())),
+        h("span", { class: "dots" }, items.slice(0, 3).map((x) => h("i", { class: x.scope + (x.status === "pending" ? " pending" : "") }))),
+      ));
+    }
+    return h("div", { class: "panel calendar" },
+      h("div", { class: "cal-head" },
+        h("button", { class: "cal-nav", "aria-label": "Предыдущий месяц", onclick: () => shiftMonth(-1) }, icon("back")),
+        h("div", { class: "cal-title" }, MONTHS[month - 1] + " " + year),
+        h("button", { class: "cal-nav next", "aria-label": "Следующий месяц", onclick: () => shiftMonth(1) }, icon("back")),
+      ),
+      h("div", { class: "cal-grid head" }, WEEKDAYS.map((w) => h("span", null, w))),
+      h("div", { class: "cal-grid" }, cells),
+    );
+  }
+
+  async function shiftMonth(delta) {
+    const [year, month] = state.month.split("-").map(Number);
+    const d = new Date(year, month - 1 + delta, 1, 12);
+    state.month = isoOf(d).slice(0, 7);
+    const todayIso = state.plans.today;
+    state.selectedDay = todayIso.slice(0, 7) === state.month ? todayIso : state.month + "-01";
+    haptic("select");
+    await refresh();
+  }
+
+  function statusBadge(x) {
+    if (x.status === "accepted") return h("span", { class: "badge ok" }, "Принято");
+    if (x.status === "declined") return h("span", { class: "badge no" }, "Отклонено");
+    return h("span", { class: "badge wait" }, x.mine ? "Ждёт ответа" : "Нужен ответ");
+  }
+
+  function planCard(x, withActions, withDate) {
+    const meta = [withDate ? dayTitle(x.date) : null, x.time, (x.scope === "c" ? "💞 " : "🤝 ") + x.partner].filter(Boolean).join(" · ");
+    return h("div", { class: "plan " + x.scope + " " + x.status, role: "button", tabindex: "0", onclick: () => openPlanDetail(x) },
+      h("div", { class: "plan-icon" }, x.emoji),
+      h("div", { class: "plan-body" },
+        h("div", { class: "plan-title" }, x.title),
+        h("div", { class: "plan-meta" }, meta),
+        withActions ? h("div", { class: "plan-actions" },
+          h("button", { class: "pbtn yes", onclick: (e) => { e.stopPropagation(); answerPlan(x, true); } }, "Принять"),
+          h("button", { class: "pbtn no", onclick: (e) => { e.stopPropagation(); answerPlan(x, false); } }, "Отклонить"),
+        ) : null,
+      ),
+      withActions ? null : statusBadge(x),
+    );
+  }
+
+  async function answerPlan(x, accept) {
+    try {
+      await api("/api/plans/" + x.id + "/respond", { method: "POST", body: { accept } });
+      haptic(accept ? "success" : "light");
+      closeSheet();
+      await refresh();
+      toast(accept ? "Принято ✅ Уведомление отправлено" : "Отклонено. Уведомление отправлено");
+    } catch (err) {
+      toast(err.message);
+      await refresh();
+    }
+  }
+
+  function openPlanDetail(x) {
+    haptic("light");
+    openSheet(() => h("div", null,
+      h("div", { class: "detail-head" },
+        h("div", { class: "habit-icon plan-icon " + x.scope }, x.emoji),
+        h("div", null, h("h2", null, x.title), h("div", { class: "habit-meta" }, dayTitle(x.date) + (x.time ? " · " + x.time : ""))),
+      ),
+      h("div", { class: "panel plan-info" },
+        h("div", null, (x.scope === "c" ? "💞 С парой: " : "🤝 С другом: "), h("b", null, x.partner)),
+        h("div", null, "Предлагает: ", h("b", null, x.mine ? "ты" : x.partner)),
+        h("div", null, "Статус: ", statusBadge(x)),
+        x.note ? h("div", { class: "plan-note" }, "💬 " + x.note) : null,
+      ),
+      !x.mine && x.status === "pending" ? [
+        h("button", { class: "btn", style: "margin-top:20px", onclick: () => answerPlan(x, true) }, "Принять"),
+        h("button", { class: "btn danger", onclick: () => answerPlan(x, false) }, "Отклонить"),
+      ] : null,
+      x.mine ? h("button", {
+        class: "btn danger", style: "margin-top:20px",
+        onclick: async () => {
+          if (!(await confirmDialog("Отменить план «" + x.title + "»? " + x.partner + " получит уведомление."))) return;
+          try {
+            await api("/api/plans/" + x.id, { method: "DELETE" });
+            closeSheet();
+            await refresh();
+            toast("План отменён");
+          } catch (err) {
+            toast(err.message);
+          }
+        },
+      }, "Отменить план") : null,
+      h("button", { class: "btn ghost", onclick: closeSheet }, "Закрыть"),
+    ));
+  }
+
+  function openPlanSheet(day) {
+    haptic("light");
+    const P = state.plans;
+    const scopes = ["f", "c"].filter((s) => P.pairs[s].status === "active");
+    const form = { scope: scopes[0], title: "", emoji: "📅", date: day && day >= P.today ? day : P.today, time: "", note: "" };
+    openSheet(() => {
+      const submit = h("button", { class: "btn", disabled: true, onclick: () => send() }, "Отправить предложение");
+      const title = h("input", { class: "input", maxlength: "60", placeholder: "Что предлагаешь?", oninput: (e) => { form.title = e.target.value; paint(); } });
+      const dateInput = h("input", { class: "input", type: "date", min: P.today, value: form.date, onchange: (e) => { form.date = e.target.value; paint(); } });
+      const timeInput = h("input", { class: "input", type: "time", onchange: (e) => { form.time = e.target.value; } });
+      const note = h("input", { class: "input", maxlength: "200", placeholder: "Комментарий (необязательно)", oninput: (e) => { form.note = e.target.value; } });
+      const emojiButtons = PLAN_EMOJIS.map((em) => h("button", { class: "emoji-opt", onclick: () => { form.emoji = em; paint(); haptic("select"); } }, em));
+      const whoButtons = scopes.map((s) => h("button", {
+        class: "tab",
+        onclick: () => { form.scope = s; paint(); haptic("select"); },
+      }, (s === "f" ? "🤝 " : "💞 ") + P.pairs[s].partner));
+      const templatesBox = h("div", { class: "chips" });
+
+      function paint() {
+        whoButtons.forEach((b, i) => b.classList.toggle("active", scopes[i] === form.scope));
+        emojiButtons.forEach((b) => b.classList.toggle("on", b.textContent === form.emoji));
+        templatesBox.replaceChildren(...PLAN_TEMPLATES[form.scope].map(([em, t]) => h("button", {
+          class: "chip",
+          onclick: () => { form.title = t; title.value = t; form.emoji = em; paint(); haptic("select"); },
+        }, em + " " + t)));
+        submit.disabled = !form.title.trim() || !form.date;
+      }
+      async function send() {
+        submit.disabled = true;
+        try {
+          await api("/api/plans", { method: "POST", body: { scope: form.scope, title: form.title, emoji: form.emoji, date: form.date, time: form.time || null, note: form.note } });
+          haptic("success");
+          closeSheet();
+          state.selectedDay = form.date;
+          state.month = form.date.slice(0, 7);
+          await refresh();
+          toast("Предложение отправлено 📨");
+        } catch (err) {
+          submit.disabled = false;
+          toast(err.message);
+        }
+      }
+      paint();
+      return h("div", null,
+        h("h2", null, "Предложить план"),
+        scopes.length > 1 ? h("div", { class: "tabs kind-tabs" }, whoButtons) : h("div", { class: "section-hint" }, "С " + P.pairs[form.scope].partner),
+        h("div", { class: "field-label" }, "Идеи"),
+        templatesBox,
+        h("div", { class: "field-label" }, "Что"),
+        title,
+        h("div", { class: "field-label" }, "Иконка"),
+        h("div", { class: "emojis" }, emojiButtons),
+        h("div", { class: "two-col" },
+          h("div", null, h("div", { class: "field-label" }, "Дата"), dateInput),
+          h("div", null, h("div", { class: "field-label" }, "Время"), timeInput),
+        ),
+        h("div", { class: "field-label" }, "Комментарий"),
+        note,
+        submit,
+      );
+    });
   }
 
   function renderProgress(d) {

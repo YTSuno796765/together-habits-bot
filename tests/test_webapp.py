@@ -252,3 +252,84 @@ def test_order_and_pin_api():
         assert (await env.call("POST", f"/api/habits/{ids['A']}/pin", json={"pinned": "yes"}))[0] == 400
 
     run(body)
+
+
+async def make_pair(env, scope, partner=2):
+    link = (await env.call("POST", "/api/invite", json={"scope": scope}))[1]["link"]
+    env.db.upsert_user(partner, f"U{partner}")
+    env.db.join_pair(link.split("join_")[1], partner)
+
+
+def test_plans_flow():
+    async def body(env):
+        from datetime import date, timedelta
+
+        await make_pair(env, "c")
+        day = (date.today() + timedelta(days=3)).isoformat()
+        status, res = await env.call(
+            "POST", "/api/plans",
+            json={"scope": "c", "title": "Ужин", "emoji": "🍽", "date": day, "time": "19:30", "note": "в 8 ресторан"},
+        )
+        assert status == 200
+        plan_id = res["id"]
+        chat, text = env.bot.sent[-1]
+        assert chat == 2 and "предлагает" in text and "Ужин" in text and "19:30" in text
+
+        mine = (await env.call("GET", "/api/plans?month=" + day[:7]))[1]
+        plan = next(p for p in mine["plans"] if p["id"] == plan_id)
+        assert plan["mine"] and plan["status"] == "pending" and plan["scope"] == "c"
+        assert mine["incoming"] == [] and mine["pairs"]["c"]["partner"] == "U2"
+
+        theirs = (await env.call("GET", "/api/plans?month=" + day[:7], user=2))[1]
+        assert [p["id"] for p in theirs["incoming"]] == [plan_id]
+
+        # The author cannot answer their own proposal; a stranger cannot either.
+        assert (await env.call("POST", f"/api/plans/{plan_id}/respond", json={"accept": True}))[0] == 400
+        assert (await env.call("POST", f"/api/plans/{plan_id}/respond", user=3, json={"accept": True}))[0] == 400
+
+        status, res = await env.call("POST", f"/api/plans/{plan_id}/respond", user=2, json={"accept": True})
+        assert status == 200 and res["status"] == "accepted"
+        assert env.bot.sent[-1][0] == 1 and "принят" in env.bot.sent[-1][1]
+        assert (await env.call("POST", f"/api/plans/{plan_id}/respond", user=2, json={"accept": False}))[0] == 400
+
+        upcoming = (await env.call("GET", "/api/plans", user=2))[1]["upcoming"]
+        assert upcoming and upcoming[0]["status"] == "accepted" and not upcoming[0]["mine"]
+
+        # Only the author can cancel; the partner is told.
+        assert (await env.call("DELETE", f"/api/plans/{plan_id}", user=2))[0] == 404
+        assert (await env.call("DELETE", f"/api/plans/{plan_id}"))[0] == 200
+        assert env.bot.sent[-1][0] == 2 and "отменяет" in env.bot.sent[-1][1]
+        assert env.db.get_plan(plan_id) is None
+
+    run(body)
+
+
+def test_plan_validation():
+    async def body(env):
+        from datetime import date, timedelta
+
+        tomorrow = (date.today() + timedelta(days=1)).isoformat()
+        # No pair yet / personal scope.
+        assert (await env.call("POST", "/api/plans", json={"scope": "f", "title": "x", "date": tomorrow}))[0] == 400
+        assert (await env.call("POST", "/api/plans", json={"scope": "p", "title": "x", "date": tomorrow}))[0] == 400
+        await make_pair(env, "f")
+        past = (date.today() - timedelta(days=1)).isoformat()
+        cases = [
+            {"title": "x", "date": past},
+            {"title": "x", "date": "завтра"},
+            {"title": " ", "date": tomorrow},
+            {"title": "x", "date": tomorrow, "time": "25:00"},
+            {"title": "x", "date": tomorrow, "time": 7},
+        ]
+        for case in cases:
+            assert (await env.call("POST", "/api/plans", json={"scope": "f", **case}))[0] == 400, case
+        assert (await env.call("POST", "/api/plans", json={"scope": "f", "title": "Зал", "date": tomorrow}))[0] == 200
+        assert (await env.call("GET", "/api/plans?month=2026-13"))[0] == 400
+        assert (await env.call("GET", "/api/plans?month=abc"))[0] == 400
+        # Friend and couple plans land on one calendar.
+        await make_pair(env, "c", partner=3)
+        await env.call("POST", "/api/plans", json={"scope": "c", "title": "Кино", "date": tomorrow})
+        plans = (await env.call("GET", "/api/plans?month=" + tomorrow[:7]))[1]["plans"]
+        assert sorted(p["scope"] for p in plans) == ["c", "f"]
+
+    run(body)

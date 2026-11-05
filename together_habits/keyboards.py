@@ -119,3 +119,13 @@ def reminder_menu(current: int | None) -> Markup:
 
 def open_today(webapp_url: str | None = None) -> Markup:
     return Markup(app_button(webapp_url) or [[Btn("✅ Отметить", callback_data="today")]])
+
+
+def plan_answer(plan_id: int, webapp_url: str | None = None) -> Markup:
+    rows = [[
+        Btn("✅ Принять", callback_data=f"plan:{plan_id}:y"),
+        Btn("❌ Отклонить", callback_data=f"plan:{plan_id}:n"),
+    ]]
+    if webapp_url:
+        rows.append([Btn("📅 Календарь", web_app=WebAppInfo(url=webapp_url))])
+    return Markup(rows)
