@@ -1,0 +1,29 @@
+# Secrets and local credentials
+.env
+.env.*
+!.env.example
+*.env
+*.pem
+*.key
+auth.json
+secrets/
+.claude/
+
+# Runtime data
+*.db
+*.db-journal
+*.sqlite3
+*.log
+
+# Python / editor noise
+.venv/
+venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
