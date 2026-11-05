@@ -7,7 +7,7 @@ name = "together-habits-bot"
 version = "0.1.0"
 description = "Telegram bot for shared habits with a friend, couple habits with a mood tracker, and personal habits."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 dependencies = [
     "python-telegram-bot[job-queue]>=21.0,<22.0",
     "tzdata; sys_platform == 'win32'",

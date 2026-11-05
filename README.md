@@ -34,7 +34,7 @@ Telegram-бот — трекер привычек, которые проще д�
 
 ## Запуск
 
-Нужен Python 3.11+ и токен бота от [@BotFather](https://t.me/BotFather).
+Нужен Python 3.10+ и токен бота от [@BotFather](https://t.me/BotFather).
 
 ```bash
 python -m venv .venv
