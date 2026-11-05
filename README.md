@@ -52,9 +52,38 @@ python -m together_habits
 | `HABITS_DB_PATH` | `habits.db` | Путь к файлу SQLite с данными. |
 | `HABITS_TIMEZONE` | `Europe/Moscow` | Часовой пояс для «сегодня» и напоминаний. |
 
-Бот получает обновления опросом (`run_polling`), поэтому публичный адрес не
-нужен: подойдёт любой компьютер или сервер с интернетом. Пока процесс запущен,
-бот работает.
+Бот получает обновления опросом (`run_polling`), поэтому публичный адрес и
+домен не нужны.
+
+## Деплой на сервер
+
+### Railway (всё из браузера, можно с телефона)
+
+1. Зайди на [railway.com](https://railway.com) через GitHub и подключи тариф Hobby.
+2. **New Project → Deploy from GitHub repo →** выбери `together-habits-bot`.
+   Railway сам найдёт `Dockerfile` и `railway.json`.
+3. В сервисе открой **Variables** и добавь `TELEGRAM_BOT_TOKEN` со своим токеном.
+   По желанию добавь `HABITS_TIMEZONE`.
+4. Добавь диск: правый клик по сервису (или `⌘K`) → **Add Volume** → mount path `/data`.
+   Без диска база будет стираться при каждом деплое.
+5. Дождись статуса **Active** и отправь боту `/start`.
+
+Каждый пуш в `main` автоматически пересобирает бота. Держи **одну** реплику:
+два экземпляра с одним токеном конфликтуют.
+
+### VPS (Ubuntu/Debian)
+
+Подключись к серверу по SSH (с телефона — например, через приложение Termius)
+и выполни от root:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/YTSuno796765/together-habits-bot/main/scripts/install-vps.sh | bash
+```
+
+Скрипт установит Python, скачает код, спросит токен (ввод скрыт), сохранит
+его в `/etc/together-habits.env` (права 600) и запустит бота как
+systemd-сервис с автоперезапуском. Чтобы обновить бота, запусти скрипт
+ещё раз. Логи: `journalctl -u together-habits -f`.
 
 ## Команды
 
