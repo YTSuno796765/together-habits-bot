@@ -89,6 +89,10 @@ class Handlers:
         members = self.db.habit_members(habit)
         checkins = self.db.checkins(habit.id)
         title = f"{habit.emoji} <b>{escape(habit.title)}</b>"
+        if habit.is_avoid:
+            text = f"💥 У {self._name(user_id)} срыв: {title}. Поддержи 🤝"
+            await self.send(bot, partner_id, text)
+            return
         if members <= checkins.get(today, set()):
             streak = logic.current_streak(
                 logic.completed_days(checkins, members), today, habit.schedule, habit.created
@@ -376,10 +380,12 @@ class Handlers:
         partner_id = view.pair.other(user_id) if view.pair else None
         for habit in view.habits:
             done = self.db.checkins(habit.id).get(today, set())
-            mark = "✅" if user_id in done else "⬜"
+            on, off = ("💥", "🟢") if habit.is_avoid else ("✅", "⬜")
+            mark = on if user_id in done else off
             if partner_id is not None:
-                mark += "✅" if partner_id in done else "⬜"
-            items.append((habit.id, f"{mark} {habit.emoji} {habit.title}"))
+                mark += on if partner_id in done else off
+            prefix = "🚫 " if habit.is_avoid else ""
+            items.append((habit.id, f"{mark} {prefix}{habit.emoji} {habit.title}"))
 
         header = f"{SCOPE_TITLE[scope]} — {today.strftime('%d.%m')}\n\n"
         if not items:
@@ -388,6 +394,8 @@ class Handlers:
             body = f"Нажми на привычку, чтобы отметить.\nСлева — ты, справа — {self._name(partner_id)}."
         else:
             body = "Нажми на привычку, чтобы отметить выполнение."
+        if any(h.is_avoid for h in view.habits):
+            body += "\n🚫 — «не делать»: день засчитан сам, нажми только при срыве."
         await self._show(update, header + body, kb.checklist(scope, items))
 
     async def _toggle(self, update: Update, context: Context, user_id: int, habit_id: int) -> None:
@@ -400,8 +408,12 @@ class Handlers:
         today = self.today()
         checked = self.db.toggle_checkin(habit_id, user_id, today)
         toast = "✅ Отмечено" if checked else "Отметка снята"
+        if habit.is_avoid:
+            toast = "💥 Срыв отмечен. Начнём заново!" if checked else "Срыв отменён"
 
-        if checked and habit.pair_id is not None:
+        if checked and habit.pair_id is not None and habit.is_avoid:
+            await self.notify_checkin(context.bot, habit, user_id, today)
+        elif checked and habit.pair_id is not None:
             members = self.db.habit_members(habit)
             checkins = self.db.checkins(habit_id)
             if members <= checkins.get(today, set()):
@@ -422,8 +434,11 @@ class Handlers:
             view = self._view(user_id, scope)
             if view is None:
                 continue
-            done = sum(1 for h in view.habits if user_id in self.db.checkins(h.id).get(today, set()))
-            lines.append(f"{SCOPE_TITLE[scope]}: {done}/{len(view.habits)}")
+            todo = [
+                h for h in view.habits if not h.is_avoid and logic.is_scheduled(h.schedule, today)
+            ]
+            done = sum(1 for h in todo if user_id in self.db.checkins(h.id).get(today, set()))
+            lines.append(f"{SCOPE_TITLE[scope]}: {done}/{len(todo)}")
             buttons.append([kb.Btn(SCOPE_TITLE[scope], callback_data=f"list:{scope}")])
         buttons.append([kb.BACK_MENU])
         await self._show(update, "\n".join(lines), kb.Markup(buttons))
@@ -441,12 +456,14 @@ class Handlers:
         all_checkins = []
         for habit in view.habits:
             checkins = self.db.checkins(habit.id)
-            all_checkins.append(checkins)
-            days = logic.completed_days(checkins, members)
+            if not habit.is_avoid:  # slips are not shared activity
+                all_checkins.append(checkins)
+            days = logic.habit_done_days(habit.kind, checkins, members, today, habit.created)
             blocks.append(
-                f"{habit.emoji} <b>{escape(habit.title)}</b>\n"
+                f"{'🚫 ' if habit.is_avoid else ''}{habit.emoji} <b>{escape(habit.title)}</b>\n"
                 f"{logic.week_marks(days, today)}\n"
-                f"🔥 Серия: {logic.current_streak(days, today, habit.schedule, habit.created)} · "
+                f"{'🛡 Без срыва' if habit.is_avoid else '🔥 Серия'}: "
+                f"{logic.habit_streak(habit.kind, days, today, habit.schedule, habit.created)} · "
                 f"🏆 Рекорд: {logic.best_streak(days, habit.schedule, habit.created)}"
             )
         if not view.habits:
@@ -530,7 +547,8 @@ class Handlers:
             pending += sum(
                 1
                 for h in view.habits
-                if logic.is_scheduled(h.schedule, today)
+                if not h.is_avoid
+                and logic.is_scheduled(h.schedule, today)
                 and user_id not in self.db.checkins(h.id).get(today, set())
             )
         return pending

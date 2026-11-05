@@ -24,7 +24,7 @@ from aiohttp import web
 from together_habits import logic
 from together_habits.db import Habit, Pair, PairError, Storage
 from together_habits.handlers import Handlers
-from together_habits.texts import SCOPE_KIND, SCOPES, TEMPLATES
+from together_habits.texts import AVOID_TEMPLATES, SCOPE_KIND, SCOPES, TEMPLATES
 
 log = logging.getLogger(__name__)
 
@@ -173,16 +173,26 @@ class WebApi:
     def _habit_payload(self, habit: Habit, user_id: int, pair: Pair | None, today: date) -> dict[str, Any]:
         checkins = self.db.checkins(habit.id)
         members = pair.members if pair else frozenset({user_id})
-        done_days = logic.completed_days(checkins, members)
+        done_days = logic.habit_done_days(habit.kind, checkins, members, today, habit.created)
         partner_id = pair.other(user_id) if pair else None
         today_users = checkins.get(today, set())
+        me_marked = user_id in today_users
+        partner_marked = (partner_id in today_users) if partner_id else None
 
         week = []
         for day in logic.week_of(today):
             status = logic.day_status(day, today, done_days, habit.schedule, habit.created)
-            if pair and status in {"missed", "today"} and checkins.get(day):
+            if habit.is_avoid and status == "today":
+                status = "missed"  # slipped today
+            if not habit.is_avoid and pair and status in {"missed", "today"} and checkins.get(day):
                 status = "half"  # only one of the two checked in
             week.append({"date": day.isoformat(), "status": status})
+
+        if habit.is_avoid:  # a mark means a slip
+            me_done = not me_marked
+            partner_done = None if partner_marked is None else not partner_marked
+        else:
+            me_done, partner_done = me_marked, partner_marked
 
         return {
             "id": habit.id,
@@ -190,11 +200,14 @@ class WebApi:
             "emoji": habit.emoji,
             "schedule": habit.schedule,
             "scheduleLabel": logic.schedule_label(habit.schedule),
+            "kind": habit.kind,
             "dueToday": logic.is_scheduled(habit.schedule, today),
-            "meDone": user_id in today_users,
-            "partnerDone": (partner_id in today_users) if partner_id else None,
+            "meMarked": me_marked,
+            "partnerMarked": partner_marked,
+            "meDone": me_done,
+            "partnerDone": partner_done,
             "week": week,
-            "streak": logic.current_streak(done_days, today, habit.schedule, habit.created),
+            "streak": logic.habit_streak(habit.kind, done_days, today, habit.schedule, habit.created),
             "best": logic.best_streak(done_days, habit.schedule, habit.created),
         }
 
@@ -213,6 +226,7 @@ class WebApi:
             "scope": scope,
             "modes": {s: self._pair_status(p) for s, p in pairs.items()},
             "templates": [{"emoji": e, "title": t} for e, t in TEMPLATES[scope]],
+            "avoidTemplates": [{"emoji": e, "title": t} for e, t in AVOID_TEMPLATES[scope]],
             "pair": None,
             "habits": [],
             "progress": {"done": 0, "total": 0},
@@ -230,7 +244,7 @@ class WebApi:
 
         _, habits = self._active_view(user_id, scope)
         items = [self._habit_payload(h, user_id, pair, today) for h in habits]
-        due = [item for item in items if item["dueToday"]]
+        due = [item for item in items if item["dueToday"] and item["kind"] == "do"]
         payload["habits"] = items
         payload["progress"] = {"done": sum(1 for i in due if i["meDone"]), "total": len(due)}
 
@@ -250,13 +264,16 @@ class WebApi:
         all_checkins = []
         for habit in habits:
             checkins = self.db.checkins(habit.id)
-            all_checkins.append(checkins)
-            series.append((habit, logic.completed_days(checkins, members)))
+            if not habit.is_avoid:  # slips are not shared activity
+                all_checkins.append(checkins)
+            series.append(
+                (habit, logic.habit_done_days(habit.kind, checkins, members, today, habit.created))
+            )
 
         def rate(window: int) -> float | None:
             done = due = 0
             for habit, days in series:
-                d, t = logic.completion(days, today, window, habit.schedule, habit.created)
+                d, t = logic.completion(days, today, window, habit.schedule, habit.created, habit.kind)
                 done, due = done + d, due + t
             return logic.ratio(done, due)
 
@@ -294,8 +311,11 @@ class WebApi:
                 {
                     "emoji": h.emoji,
                     "title": h.title,
-                    "rate30": logic.ratio(*logic.completion(days, today, 30, h.schedule, h.created)),
-                    "streak": logic.current_streak(days, today, h.schedule, h.created),
+                    "kind": h.kind,
+                    "rate30": logic.ratio(
+                        *logic.completion(days, today, 30, h.schedule, h.created, h.kind)
+                    ),
+                    "streak": logic.habit_streak(h.kind, days, today, h.schedule, h.created),
                     "best": logic.best_streak(days, h.schedule, h.created),
                 }
                 for h, days in series
@@ -346,6 +366,9 @@ class WebApi:
         scope = self._scope(data.get("scope"))
         pair, _ = self._active_view(user_id, scope)
         schedule = data.get("schedule", logic.EVERY_DAY)
+        kind = data.get("kind", "do")
+        if kind not in ("do", "avoid"):
+            raise ApiError("Неизвестный тип привычки")
         if not isinstance(schedule, int):
             raise ApiError("Некорректное расписание")
         try:
@@ -356,6 +379,7 @@ class WebApi:
                 pair_id=pair.id if pair else None,
                 schedule=schedule,
                 created=self.today(),
+                kind=kind,
             )
         except ValueError as exc:
             raise ApiError("Проверь название и дни недели (максимум 15 привычек)") from exc

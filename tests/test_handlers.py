@@ -166,3 +166,19 @@ def test_reminder_counts_pending(hx):
 def test_split_emoji():
     assert _split_emoji("🥗 Завтрак") == ("🥗", "Завтрак")
     assert _split_emoji("Бег по утрам") == ("⭐", "Бег по утрам")
+
+
+def test_avoid_habit_in_bot_list(hx):
+    from datetime import datetime
+
+    hx.start(1)
+    today = datetime.now(ZoneInfo("UTC")).date()
+    habit = hx.db.add_habit("Курить", "🚭", owner_id=1, kind="avoid", created=today)
+    listing = hx.press(1, "list:p")
+    assert "🟢 🚫 🚭 Курить" in str(listing.edits[-1][1].to_dict())
+    slip = hx.press(1, f"chk:{habit.id}")
+    assert slip.answers == ["💥 Срыв отмечен. Начнём заново!"]
+    # "Don't do" habits never trigger reminders.
+    assert hx.h.pending_count(1, today) == 0
+    stats = hx.press(1, "stats:p")
+    assert "Без срыва: 0" in stats.edits[-1][0]

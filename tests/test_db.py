@@ -108,3 +108,11 @@ def test_schedule_and_migration(tmp_path):
     with pytest.raises(ValueError):
         storage.add_habit("Никогда", owner_id=1, schedule=0)
     storage.close()
+
+
+def test_habit_kind(db):
+    habit = db.add_habit("Курить", "🚭", owner_id=1, kind="avoid")
+    assert habit.is_avoid and db.get_habit(habit.id).kind == "avoid"
+    assert db.add_habit("Читать", owner_id=1).kind == "do"
+    with pytest.raises(ValueError):
+        db.add_habit("x", owner_id=1, kind="maybe")

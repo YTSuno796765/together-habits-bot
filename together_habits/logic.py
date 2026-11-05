@@ -33,6 +33,37 @@ def completed_days(checkins: Mapping[date, set[int]], members: Iterable[int]) ->
     return {day for day, users in checkins.items() if required <= users}
 
 
+def avoid_clean_days(
+    slips: Mapping[date, set[int]],
+    members: Iterable[int],
+    today: date,
+    start: date | None,
+) -> set[date]:
+    """For "don't do" habits: every day from start to today without a slip by any member."""
+    who = set(members)
+    first = start or today
+    result = set()
+    cursor = first
+    while cursor <= today:
+        if not (slips.get(cursor, set()) & who):
+            result.add(cursor)
+        cursor += ONE_DAY
+    return result
+
+
+def habit_done_days(
+    kind: str,
+    checkins: Mapping[date, set[int]],
+    members: Iterable[int],
+    today: date,
+    start: date | None,
+) -> set[date]:
+    """Days that count as success: all members checked in, or (avoid) nobody slipped."""
+    if kind == "avoid":
+        return avoid_clean_days(checkins, members, today, start)
+    return completed_days(checkins, members)
+
+
 def current_streak(
     days: set[date], today: date, schedule: int = EVERY_DAY, start: date | None = None
 ) -> int:
@@ -50,6 +81,15 @@ def current_streak(
             streak += 1
         cursor -= ONE_DAY
     return streak
+
+
+def habit_streak(
+    kind: str, days: set[date], today: date, schedule: int = EVERY_DAY, start: date | None = None
+) -> int:
+    """Current streak; for "don't do" habits a slip today resets it to zero right away."""
+    if kind == "avoid" and today not in days and (start is None or start <= today):
+        return 0
+    return current_streak(days, today, schedule, start)
 
 
 def best_streak(days: set[date], schedule: int = EVERY_DAY, start: date | None = None) -> int:
@@ -103,10 +143,22 @@ def due_days(
 
 
 def completion(
-    days: set[date], today: date, window: int, schedule: int = EVERY_DAY, start: date | None = None
+    days: set[date],
+    today: date,
+    window: int,
+    schedule: int = EVERY_DAY,
+    start: date | None = None,
+    kind: str = "do",
 ) -> tuple[int, int]:
-    """(done, due) scheduled days in the last `window` days."""
+    """(done, due) scheduled days in the last `window` days.
+
+    A to-do habit's today counts once done; a "don't do" habit's today always counts
+    (it is a success until a slip is marked).
+    """
     due = due_days(today, window, schedule, start, days)
+    if kind == "avoid" and is_scheduled(schedule, today) and (start is None or start <= today):
+        if today not in due:
+            due.append(today)
     return sum(1 for day in due if day in days), len(due)
 
 

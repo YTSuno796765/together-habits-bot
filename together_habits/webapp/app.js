@@ -14,7 +14,7 @@
   const MOODS = { 1: "😞", 2: "😕", 3: "😐", 4: "🙂", 5: "😄" };
   const WEEKDAYS = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"];
   const EMOJIS = ["⭐", "🏃", "🏋️", "📖", "🧘", "💧", "🥗", "😴", "💰", "🎯", "📝", "🇬🇧", "🚭", "📵", "🚶", "🤗",
-    "💬", "🎬", "🧹", "🎸", "💊", "🌅", "🧠", "❤️"];
+    "💬", "🎬", "🧹", "🎸", "💊", "🌅", "🧠", "❤️", "🚫", "🍺", "🍔", "🍬", "🎮", "🎰", "😤", "🍕"];
 
   const state = { scope: loadScope(), view: "home", data: null, stats: null, busy: false };
 
@@ -41,6 +41,7 @@
     check: '<path d="M5 12.5l4.5 4.5L19 7.5" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" fill="none"/>',
     back: '<path d="M15 5l-7 7 7 7" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" fill="none"/>',
     flame: '<path fill="currentColor" d="M12.6 2.2c.5 3-1.1 4.6-2.6 6.2C8.6 9.9 7 11.6 7 14.3A5 5 0 0 0 12 19.5a5 5 0 0 0 5-5.2c0-2.3-1.2-3.6-2-4.5.1 1.5-.4 2.6-1.4 3.1.5-3.4-.1-7.3-1-10.7zM12 21.8c-1.9 0-3.4-1.4-3.4-3.2 0-1.6 1.1-2.5 2-3.4.7-.7 1.3-1.4 1.4-2.5 1.4 1.1 3.4 2.9 3.4 5.6 0 1.9-1.5 3.5-3.4 3.5z" opacity=".95"/>',
+    shield: '<path fill="currentColor" d="M12 2.5l7.5 3v6c0 4.6-3.2 8.6-7.5 10-4.3-1.4-7.5-5.4-7.5-10v-6z"/><path d="M8.5 12.2l2.4 2.4 4.6-4.8" stroke="#1b1724" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>',
     share: '<path d="M12 3v12M7 8l5-5 5 5M5 14v5a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>',
   };
   function icon(name) {
@@ -141,7 +142,7 @@
       formatDate(d.today),
       h("div", { class: "actions" },
         pairActive && d.habits.length ? h("button", { class: "icon-btn", "aria-label": "Статистика", onclick: openStats }, icon("chart")) : null,
-        pairActive ? h("button", { class: "icon-btn", "aria-label": "Добавить привычку", onclick: openAddSheet }, icon("plus")) : null,
+        pairActive ? h("button", { class: "icon-btn", "aria-label": "Добавить привычку", onclick: () => openAddSheet("do") }, icon("plus")) : null,
       ),
     );
 
@@ -173,7 +174,9 @@
   function renderProgress(d) {
     const { done, total } = d.progress;
     const width = total ? Math.round((done / total) * 100) : 0;
+    const hasDo = d.habits.some((x) => x.kind !== "avoid");
     const hint = !d.habits.length ? "Добавь первую привычку — нажми +"
+      : !hasDo ? "Добавь то, что хочешь делать каждый день — нажми +"
       : total === 0 ? "Сегодня выходной от привычек 🌿"
       : done === total ? "Всё выполнено. Ты красавчик 🔥"
       : "Осталось: " + (total - done);
@@ -202,53 +205,82 @@
   }
 
   function renderHabitSections(d) {
-    if (!d.habits.length) {
-      return [h("div", { class: "panel hero", style: "margin-top:14px" },
+    const doHabits = d.habits.filter((x) => x.kind !== "avoid");
+    const avoid = d.habits.filter((x) => x.kind === "avoid");
+    const todo = doHabits.filter((x) => x.dueToday && !x.meDone);
+    const done = doHabits.filter((x) => x.dueToday && x.meDone);
+    const off = doHabits.filter((x) => !x.dueToday);
+    const grid = (items) => h("div", { class: "grid" }, items.map(habitCard));
+    const out = [];
+    if (!doHabits.length) {
+      out.push(h("div", { class: "panel hero", style: "margin-top:14px" },
         h("div", { class: "big" }, state.scope === "p" ? "🎯" : state.scope === "f" ? "🤝" : "💞"),
         h("h2", null, "Пока пусто"),
         h("p", null, "Выбери привычку из шаблонов или придумай свою."),
-        h("button", { class: "btn", onclick: openAddSheet }, icon("plus"), "Добавить привычку"),
-      )];
+        h("button", { class: "btn", onclick: () => openAddSheet("do") }, icon("plus"), "Добавить привычку"),
+      ));
     }
-    const todo = d.habits.filter((x) => x.dueToday && !x.meDone);
-    const done = d.habits.filter((x) => x.dueToday && x.meDone);
-    const off = d.habits.filter((x) => !x.dueToday);
-    const out = [];
-    if (todo.length) out.push(h("div", { class: "section-title" }, "Сделать"), todo.map(habitCard));
-    if (done.length) out.push(h("div", { class: "section-title" }, "Готово"), done.map(habitCard));
-    if (off.length) out.push(h("div", { class: "section-title" }, "Не сегодня"), off.map(habitCard));
+    if (todo.length) out.push(h("div", { class: "section-title" }, "Сделать"), grid(todo));
+    if (done.length) out.push(h("div", { class: "section-title" }, "Готово"), grid(done));
+    if (off.length) out.push(h("div", { class: "section-title" }, "Не сегодня"), grid(off));
+    out.push(
+      h("div", { class: "section-title row-title" },
+        h("span", null, "Не делать"),
+        h("button", { class: "mini-add", onclick: () => openAddSheet("avoid") }, "+ добавить"),
+      ),
+      avoid.length
+        ? [h("div", { class: "section-hint" }, "Каждый день засчитывается сам. Жми «Срыв», только если сорвался."), grid(avoid)]
+        : h("button", { class: "avoid-empty", onclick: () => openAddSheet("avoid") },
+          "🚫 Добавь то, от чего отказываешься: курение, сладкое, думскроллинг…"),
+    );
     return out;
   }
 
+  function personDots(x, markedClass) {
+    if (x.partnerMarked === null || x.partnerMarked === undefined) return null;
+    const partner = state.data.pair.partner;
+    const dot = (name, marked) => h("span", { class: "pdot" + (marked ? " " + markedClass : ""), title: name }, initial(name));
+    return h("div", { class: "pdots" }, dot(state.data.me.name, x.meMarked), dot(partner, x.partnerMarked));
+  }
+
   function habitCard(x) {
-    const partner = state.data.pair && state.data.pair.partner;
-    const card = h("div", {
-      class: "habit" + (x.dueToday && x.meDone && (x.partnerDone !== false) ? " is-done" : "") + (!x.dueToday ? " is-off" : ""),
-      role: "button",
-      tabindex: "0",
-      onclick: () => openHabitSheet(x),
-    },
-      h("div", { class: "habit-top" },
-        h("div", { class: "habit-icon" }, x.emoji),
-        h("button", {
-          class: "check" + (x.meDone ? " on" : ""),
-          "aria-label": x.meDone ? "Снять отметку" : "Отметить выполнение",
-          "aria-pressed": x.meDone ? "true" : "false",
-          onclick: (e) => { e.stopPropagation(); toggle(x, e.currentTarget); },
-        }, icon("check")),
-      ),
+    const isAvoid = x.kind === "avoid";
+    const slipped = isAvoid && (x.meMarked || x.partnerMarked);
+    const classes = ["habit", isAvoid ? "avoid" : ""];
+    if (!isAvoid && x.dueToday && x.meDone && x.partnerDone !== false) classes.push("is-done");
+    if (!isAvoid && !x.dueToday) classes.push("is-off");
+    if (slipped) classes.push("slipped");
+
+    const action = isAvoid
+      ? h("button", {
+        class: "slip" + (x.meMarked ? " on" : ""),
+        "aria-pressed": x.meMarked ? "true" : "false",
+        onclick: (e) => { e.stopPropagation(); toggle(x, e.currentTarget); },
+      }, x.meMarked ? "Отменить" : "Срыв")
+      : h("button", {
+        class: "check" + (x.meMarked ? " on" : ""),
+        "aria-label": x.meMarked ? "Снять отметку" : "Отметить выполнение",
+        "aria-pressed": x.meMarked ? "true" : "false",
+        onclick: (e) => { e.stopPropagation(); toggle(x, e.currentTarget); },
+      }, icon("check"));
+
+    const meta = isAvoid
+      ? (x.meMarked ? "срыв сегодня" : x.partnerMarked ? "срыв у " + state.data.pair.partner : "держусь")
+      : x.scheduleLabel;
+
+    return h("div", { class: classes.join(" "), role: "button", tabindex: "0", onclick: () => openHabitSheet(x) },
+      h("div", { class: "habit-top" }, h("div", { class: "habit-icon" }, x.emoji), action),
       h("div", { class: "habit-title" }, x.title),
-      h("div", { class: "habit-meta" }, x.scheduleLabel),
-      x.partnerDone !== null && x.partnerDone !== undefined ? h("div", { class: "people" },
-        h("span", { class: "person" + (x.meDone ? " on" : "") }, h("span", { class: "dot" }, x.meDone ? "✓" : initial(state.data.me.name)), "Ты"),
-        h("span", { class: "person" + (x.partnerDone ? " on" : "") }, h("span", { class: "dot" }, x.partnerDone ? "✓" : initial(partner)), partner),
-      ) : null,
-      h("div", { class: "week", "aria-label": "Эта неделя" },
-        x.week.map((w) => h("span", { class: "seg " + w.status, title: w.date })),
-        h("span", { class: "streak", "aria-label": "Серия " + x.streak }, icon("flame"), String(x.streak)),
+      h("div", { class: "habit-meta" }, meta),
+      h("div", { class: "habit-bottom" },
+        h("div", { class: "week", "aria-label": "Эта неделя" }, x.week.map((w) => h("span", { class: "seg " + w.status, title: w.date }))),
+        h("div", { class: "habit-foot" },
+          personDots(x, isAvoid ? "bad" : "good"),
+          h("span", { class: "streak" + (isAvoid ? " clean" : ""), "aria-label": (isAvoid ? "Без срывов " : "Серия ") + x.streak },
+            isAvoid ? icon("shield") : icon("flame"), String(x.streak), isAvoid ? h("small", null, " дн.") : null),
+        ),
       ),
     );
-    return card;
   }
 
   function renderInvite(d) {
@@ -314,9 +346,9 @@
       h("div", { class: "panel hlist" }, s.habits.map((x) => h("div", { class: "item" },
         h("div", { class: "ic" }, x.emoji),
         h("div", { class: "body" },
-          h("div", { class: "name" }, x.title),
+          h("div", { class: "name" }, (x.kind === "avoid" ? "🚫 " : "") + x.title),
           h("div", { class: "mini" }, h("span", { style: "width:" + Math.round((x.rate30 || 0) * 100) + "%" })),
-          h("div", { class: "sub" }, "серия " + x.streak + " · рекорд " + x.best),
+          h("div", { class: "sub" }, (x.kind === "avoid" ? "без срыва " : "серия ") + x.streak + " · рекорд " + x.best),
         ),
         h("div", { class: "pct" }, pct(x.rate30)),
       ))),
@@ -391,24 +423,31 @@
 
   async function toggle(habit, button) {
     if (state.busy) return;
+    const isAvoid = habit.kind === "avoid";
+    const marking = !habit.meMarked;
+    if (isAvoid && marking) {
+      const ok = await confirmDialog("Отметить срыв? Серия «без срывов» начнётся заново.");
+      if (!ok) return;
+    }
     state.busy = true;
-    const wasDone = habit.meDone;
-    habit.meDone = !wasDone;
-    button.classList.toggle("on", habit.meDone);
+    habit.meMarked = marking;
+    button.classList.toggle("on", marking);
     button.classList.add("pop");
-    haptic(habit.meDone ? "success" : "light");
+    haptic(isAvoid ? (marking ? "heavy" : "light") : (marking ? "success" : "light"));
     try {
       await api("/api/checkin", { method: "POST", body: { habitId: habit.id } });
       await loadState();
       render();
       const fresh = state.data.habits.find((x) => x.id === habit.id);
-      if (!wasDone && fresh) {
+      if (isAvoid) {
+        toast(marking ? "Срыв отмечен. Завтра — новый день 💪" : "Срыв отменён");
+      } else if (marking && fresh) {
         if (fresh.partnerDone === false) toast("Отмечено! Ждём " + state.data.pair.partner + " 👀");
         else if (fresh.streak > 1) toast("Серия " + fresh.streak + " 🔥");
         else toast("Отмечено ✅");
       }
     } catch (err) {
-      habit.meDone = wasDone;
+      habit.meMarked = !marking;
       render();
       toast(err.message);
     } finally {
@@ -485,65 +524,93 @@
     if (closeCurrentSheet) closeCurrentSheet();
   }
 
-  function openAddSheet() {
+  function openAddSheet(kind) {
     haptic("light");
-    const form = { title: "", emoji: "⭐", schedule: 127 };
+    const form = { kind: kind === "avoid" ? "avoid" : "do", title: "", emoji: kind === "avoid" ? "🚫" : "⭐", schedule: 127 };
     openSheet(() => {
+      const submit = h("button", { class: "btn", disabled: true, onclick: () => save() }, "Добавить");
       const input = h("input", {
-        class: "input", maxlength: "40", placeholder: "Например, «Прогулка 30 минут»", enterkeyhint: "done",
-        oninput: (e) => { form.title = e.target.value; submit.disabled = !form.title.trim(); },
+        class: "input", maxlength: "40", enterkeyhint: "done",
+        oninput: (e) => { form.title = e.target.value; paintDays(); },
       });
       const emojiButtons = EMOJIS.map((em) => h("button", {
-        class: "emoji-opt" + (em === form.emoji ? " on" : ""),
-        onclick: () => { form.emoji = em; emojiButtons.forEach((b) => b.classList.toggle("on", b.textContent === em)); haptic("select"); },
+        class: "emoji-opt",
+        onclick: () => { form.emoji = em; paintEmoji(); haptic("select"); },
       }, em));
       const dayButtons = WEEKDAYS.map((label, i) => h("button", {
         class: "day on",
+        onclick: () => { form.schedule ^= 1 << i; paintDays(); haptic("select"); },
+      }, label));
+      const preset = (label, mask) => h("button", { class: "chip", onclick: () => { form.schedule = mask; paintDays(); } }, label);
+      const templatesBox = h("div", null);
+      const kindButtons = [["do", "Делать"], ["avoid", "Не делать"]].map(([value, label]) => h("button", {
+        class: "tab",
         onclick: () => {
-          form.schedule ^= 1 << i;
-          paintDays();
+          if (form.kind === value) return;
+          form.kind = value;
+          form.title = "";
+          input.value = "";
+          form.emoji = value === "avoid" ? "🚫" : "⭐";
+          paintKind();
           haptic("select");
         },
       }, label));
+      const kindHint = h("div", { class: "section-hint" });
+
+      function paintEmoji() {
+        emojiButtons[0].textContent = EMOJIS.includes(form.emoji) ? EMOJIS[0] : form.emoji;
+        emojiButtons.forEach((b) => b.classList.toggle("on", b.textContent === form.emoji));
+      }
       function paintDays() {
         dayButtons.forEach((b, i) => b.classList.toggle("on", Boolean(form.schedule & (1 << i))));
         submit.disabled = !form.title.trim() || !form.schedule;
       }
-      const preset = (label, mask) => h("button", { class: "chip", onclick: () => { form.schedule = mask; paintDays(); } }, label);
-      const templates = (state.data.templates || []).filter((t) => !state.data.habits.some((x) => x.title === t.title));
-      const submit = h("button", {
-        class: "btn", disabled: true,
-        onclick: async () => {
-          submit.disabled = true;
-          try {
-            await api("/api/habits", { method: "POST", body: { scope: state.scope, title: form.title, emoji: form.emoji, schedule: form.schedule } });
-            haptic("success");
-            closeSheet();
-            await refresh();
-            toast("Привычка добавлена ✨");
-          } catch (err) {
-            submit.disabled = false;
-            toast(err.message);
-          }
-        },
-      }, "Добавить");
-
-      return h("div", null,
-        h("h2", null, "Новая привычка"),
-        templates.length ? [
+      function paintKind() {
+        const isAvoid = form.kind === "avoid";
+        kindButtons.forEach((b, i) => b.classList.toggle("active", (i === 1) === isAvoid));
+        input.placeholder = isAvoid ? "Например, «Курить»" : "Например, «Прогулка 30 минут»";
+        kindHint.textContent = isAvoid
+          ? "Каждый день без срыва засчитывается сам. Отмечать нужно только срыв."
+          : "Отмечай выполнение каждый день по расписанию.";
+        const source = isAvoid ? state.data.avoidTemplates : state.data.templates;
+        const templates = (source || []).filter((t) => !state.data.habits.some((x) => x.title === t.title));
+        templatesBox.replaceChildren(...(templates.length ? [
           h("div", { class: "field-label" }, "Шаблоны"),
           h("div", { class: "chips" }, templates.map((t) => h("button", {
             class: "chip",
             onclick: () => {
-              form.title = t.title; input.value = t.title;
-              if (!EMOJIS.includes(t.emoji)) emojiButtons[0].textContent = t.emoji;
+              form.title = t.title;
+              input.value = t.title;
               form.emoji = t.emoji;
-              emojiButtons.forEach((b) => b.classList.toggle("on", b.textContent === t.emoji));
+              paintEmoji();
               paintDays();
               haptic("select");
             },
           }, t.emoji + " " + t.title))),
-        ] : null,
+        ] : []));
+        paintEmoji();
+        paintDays();
+      }
+      async function save() {
+        submit.disabled = true;
+        try {
+          await api("/api/habits", { method: "POST", body: { scope: state.scope, kind: form.kind, title: form.title, emoji: form.emoji, schedule: form.schedule } });
+          haptic("success");
+          closeSheet();
+          await refresh();
+          toast(form.kind === "avoid" ? "Держись! Считаю дни без срывов 🛡" : "Привычка добавлена ✨");
+        } catch (err) {
+          submit.disabled = false;
+          toast(err.message);
+        }
+      }
+
+      paintKind();
+      return h("div", null,
+        h("h2", null, "Новая привычка"),
+        h("div", { class: "tabs kind-tabs" }, kindButtons),
+        kindHint,
+        templatesBox,
         h("div", { class: "field-label" }, "Название"),
         input,
         h("div", { class: "field-label" }, "Иконка"),
@@ -561,9 +628,11 @@
     openSheet(() => h("div", null,
       h("div", { class: "detail-head" },
         h("div", { class: "habit-icon" }, x.emoji),
-        h("div", null, h("h2", null, x.title), h("div", { class: "habit-meta" }, x.scheduleLabel)),
+        h("div", null, h("h2", null, x.title), h("div", { class: "habit-meta" }, x.kind === "avoid" ? "не делать · " + x.scheduleLabel : x.scheduleLabel)),
       ),
-      h("div", { class: "tiles two" }, tile(String(x.streak), "текущая серия"), tile(String(x.best), "рекорд")),
+      h("div", { class: "tiles two" },
+        tile(String(x.streak), x.kind === "avoid" ? "дней без срыва" : "текущая серия"),
+        tile(String(x.best), x.kind === "avoid" ? "рекорд без срыва" : "рекорд")),
       h("div", { class: "week", style: "margin:18px 0 6px" }, x.week.map((w) => h("span", { class: "seg " + w.status }))),
       h("div", { class: "labels" }, WEEKDAYS.map((w) => h("span", null, w))),
       h("button", {

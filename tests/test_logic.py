@@ -81,3 +81,18 @@ def test_day_status_and_completion():
     assert logic.completion(days, TODAY, 7, 127, start) == (1, 3)
     assert logic.completion(days | {TODAY}, TODAY, 7, 127, start) == (2, 4)
     assert logic.week_of(TODAY)[0].weekday() == 0 and len(logic.week_of(TODAY)) == 7
+
+
+def test_avoid_habit_days_and_streak():
+    start = d(5)
+    slips = {d(2): {1}}
+    clean = logic.habit_done_days("avoid", slips, {1}, TODAY, start)
+    assert clean == {d(5), d(4), d(3), d(1), d(0)}
+    assert logic.habit_streak("avoid", clean, TODAY, 127, start) == 2
+    assert logic.best_streak(clean, 127, start) == 3
+    # A slip by the partner breaks a shared "don't do" habit too.
+    assert d(1) not in logic.habit_done_days("avoid", {d(1): {2}}, {1, 2}, TODAY, start)
+    # A slip today resets the streak at once (no "day still open" grace).
+    slipped_today = logic.habit_done_days("avoid", {TODAY: {1}}, {1}, TODAY, start)
+    assert logic.habit_streak("avoid", slipped_today, TODAY, 127, start) == 0
+    assert logic.habit_streak("do", slipped_today, TODAY, 127, start) == 5

@@ -10,6 +10,7 @@ from pathlib import Path
 
 PAIR_KINDS = ("friend", "couple")
 EVERY_DAY = 0b1111111
+HABIT_KINDS = ("do", "avoid")
 MAX_HABITS_PER_SCOPE = 15
 
 SCHEMA = """
@@ -34,6 +35,7 @@ CREATE TABLE IF NOT EXISTS habits (
     owner_id INTEGER REFERENCES users(id),
     pair_id INTEGER REFERENCES pairs(id) ON DELETE CASCADE,
     schedule INTEGER NOT NULL DEFAULT 127,
+    kind TEXT NOT NULL DEFAULT 'do',
     archived INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CHECK ((owner_id IS NULL) <> (pair_id IS NULL))
@@ -90,6 +92,11 @@ class Habit:
     pair_id: int | None
     schedule: int = EVERY_DAY  # bit N set = weekday N (Monday = 0)
     created: date | None = None
+    kind: str = "do"  # "do": check in when done; "avoid": check in only on a slip
+
+    @property
+    def is_avoid(self) -> bool:
+        return self.kind == "avoid"
 
 
 class Storage:
@@ -107,6 +114,8 @@ class Storage:
         columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(habits)")}
         if "schedule" not in columns:
             self.conn.execute("ALTER TABLE habits ADD COLUMN schedule INTEGER NOT NULL DEFAULT 127")
+        if "kind" not in columns:
+            self.conn.execute("ALTER TABLE habits ADD COLUMN kind TEXT NOT NULL DEFAULT 'do'")
 
     def close(self) -> None:
         self.conn.close()
@@ -218,6 +227,7 @@ class Storage:
             row["pair_id"],
             row["schedule"],
             created,
+            row["kind"],
         )
 
     def add_habit(
@@ -229,7 +239,10 @@ class Storage:
         pair_id: int | None = None,
         schedule: int = EVERY_DAY,
         created: date | None = None,
+        kind: str = "do",
     ) -> Habit:
+        if kind not in HABIT_KINDS:
+            raise ValueError(f"unknown habit kind: {kind}")
         if (owner_id is None) == (pair_id is None):
             raise ValueError("habit needs exactly one of owner_id or pair_id")
         if not 1 <= schedule <= EVERY_DAY:
@@ -242,9 +255,9 @@ class Storage:
             raise ValueError("too many habits")
         created_at = (created or date.today()).isoformat() + " 00:00:00"
         cur = self.conn.execute(
-            "INSERT INTO habits (title, emoji, owner_id, pair_id, schedule, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (title, emoji, owner_id, pair_id, schedule, created_at),
+            "INSERT INTO habits (title, emoji, owner_id, pair_id, schedule, created_at, kind) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (title, emoji, owner_id, pair_id, schedule, created_at, kind),
         )
         self.conn.commit()
         habit = self.get_habit(cur.lastrowid)

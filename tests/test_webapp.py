@@ -172,3 +172,53 @@ def test_couple_flow():
         assert stats["pair"]["moodWeek"][-1] == {"label": stats["pair"]["moodWeek"][-1]["label"], "me": 5, "partner": 4}
 
     run(body)
+
+
+def test_avoid_habits():
+    async def body(env):
+        status, _ = await env.call(
+            "POST", "/api/habits", json={"scope": "p", "kind": "avoid", "title": "Курить", "emoji": "🚭"}
+        )
+        assert status == 200
+        assert (await env.call("POST", "/api/habits", json={"scope": "p", "kind": "zzz", "title": "x"}))[0] == 400
+        state = (await env.call("GET", "/api/state?scope=p"))[1]
+        assert state["avoidTemplates"]
+        habit = state["habits"][0]
+        assert habit["kind"] == "avoid" and habit["meDone"] is True and habit["meMarked"] is False
+        assert habit["streak"] == 1 and habit["week"][habit_index_today(state)]["status"] == "done"
+        # "Don't do" habits are not part of the daily to-do progress.
+        assert state["progress"] == {"done": 0, "total": 0}
+
+        await env.call("POST", "/api/checkin", json={"habitId": habit["id"]})  # slip
+        state = (await env.call("GET", "/api/state?scope=p"))[1]
+        habit = state["habits"][0]
+        assert habit["meMarked"] is True and habit["meDone"] is False and habit["streak"] == 0
+        assert habit["week"][habit_index_today(state)]["status"] == "missed"
+        stats = (await env.call("GET", "/api/stats?scope=p"))[1]
+        assert stats["habits"][0]["kind"] == "avoid" and stats["rate7"] == 0.0
+
+    run(body)
+
+
+def test_shared_avoid_slip_notifies_partner():
+    async def body(env):
+        link = (await env.call("POST", "/api/invite", json={"scope": "f"}))[1]["link"]
+        env.db.upsert_user(2, "U2")
+        env.db.join_pair(link.split("join_")[1], 2)
+        await env.call("POST", "/api/habits", json={"scope": "f", "kind": "avoid", "title": "Курить"})
+        habit = (await env.call("GET", "/api/state?scope=f"))[1]["habits"][0]
+        await env.call("POST", "/api/checkin", user=2, json={"habitId": habit["id"]})
+        assert env.bot.sent[-1][0] == 1 and "срыв" in env.bot.sent[-1][1]
+        mine = (await env.call("GET", "/api/state?scope=f"))[1]["habits"][0]
+        assert mine["meDone"] is True and mine["partnerDone"] is False and mine["partnerMarked"] is True
+        assert mine["streak"] == 0  # the shared clean streak is broken
+        stats = (await env.call("GET", "/api/stats?scope=f"))[1]
+        assert stats["pair"]["sync"] is None  # slips do not count as shared activity
+
+    run(body)
+
+
+def habit_index_today(state):
+    from datetime import date
+
+    return date.fromisoformat(state["today"]).weekday()
