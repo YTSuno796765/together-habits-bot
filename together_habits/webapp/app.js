@@ -53,6 +53,7 @@
     sort: '<path d="M7 4v16M7 4L3.5 7.5M7 4l3.5 3.5M17 20V4m0 16l-3.5-3.5M17 20l3.5-3.5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>',
     pin: '<path fill="currentColor" d="M14.6 2.6l6.8 6.8-2.1.7-3.6 3.6.4 4.3-1.6 1.6-3.9-3.9-5.5 5.5-1.4-1.4 5.5-5.5L5.3 10.4 6.9 8.8l4.3.4 3.6-3.6z"/>',
     grip: '<path d="M9 6h.01M15 6h.01M9 12h.01M15 12h.01M9 18h.01M15 18h.01" stroke="currentColor" stroke-width="3.2" stroke-linecap="round"/>',
+    gear: '<path d="M12 15.2a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4z" stroke="currentColor" stroke-width="2.1" fill="none"/><path d="M19.4 13.5a7.6 7.6 0 0 0 0-3l2-1.6-2-3.4-2.4.9a7.5 7.5 0 0 0-2.6-1.5L14 2.4h-4l-.4 2.5A7.5 7.5 0 0 0 7 6.4l-2.4-.9-2 3.4 2 1.6a7.6 7.6 0 0 0 0 3l-2 1.6 2 3.4 2.4-.9a7.5 7.5 0 0 0 2.6 1.5l.4 2.5h4l.4-2.5a7.5 7.5 0 0 0 2.6-1.5l2.4.9 2-3.4z" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round" fill="none"/>',
     share: '<path d="M12 3v12M7 8l5-5 5 5M5 14v5a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>',
   };
   function icon(name) {
@@ -119,9 +120,36 @@
       if (!state.month) state.month = new Date().toISOString().slice(0, 7);
       state.plans = await api("/api/plans?month=" + state.month);
       if (!state.selectedDay) state.selectedDay = state.plans.today;
+      state.sections = state.plans.sections;
       return;
     }
     state.data = await api("/api/state?scope=" + state.scope);
+    state.sections = state.data.sections;
+    if (state.sections[state.scope] && state.sections[state.scope].hidden) {
+      // The section was hidden (maybe on another device) — fall back to personal.
+      state.scope = "p";
+      saveScope("p");
+      state.data = await api("/api/state?scope=p");
+      state.sections = state.data.sections;
+    }
+  }
+
+  // Section names and visibility are per user ("С другом" → "Миша").
+  function sectionInfo(id) {
+    return (state.sections && state.sections[id]) || {};
+  }
+  function tabLabel(scope) {
+    return sectionInfo(scope.id).name || scope.tab;
+  }
+  function titleOf(id) {
+    const scope = SCOPES.find((s) => s.id === id);
+    return sectionInfo(id).name || scope.title;
+  }
+  function visibleScopes() {
+    return SCOPES.filter((s) => !sectionInfo(s.id).hidden);
+  }
+  function settingsButton() {
+    return h("button", { class: "icon-btn", "aria-label": "Настройки разделов", onclick: openSettingsSheet }, icon("gear"));
   }
   async function loadStats() {
     state.stats = await api("/api/stats?scope=" + state.scope);
@@ -162,12 +190,13 @@
         pairActive && d.habits.length > 1 ? h("button", { class: "icon-btn", "aria-label": "Порядок привычек", onclick: openOrderSheet }, icon("sort")) : null,
         pairActive && d.habits.length ? h("button", { class: "icon-btn", "aria-label": "Статистика", onclick: openStats }, icon("chart")) : null,
         pairActive ? h("button", { class: "icon-btn", "aria-label": "Добавить привычку", onclick: () => openAddSheet("do") }, icon("plus")) : null,
+        settingsButton(),
       ),
     );
 
     const tabs = renderTabs();
 
-    const page = [header, h("h1", null, scopeInfo.title)];
+    const page = [header, h("h1", null, titleOf(scopeInfo.id))];
     if (d.pair && d.pair.status === "active") {
       page.push(h("p", { class: "subtitle" }, "Вы и ", h("b", null, d.pair.partner), state.scope === "c" ? " 💞" : " 🤝"));
     }
@@ -184,13 +213,14 @@
   }
 
   function renderTabs() {
-    return h("div", { class: "tabs four", role: "tablist" },
-      SCOPES.map((s) => h("button", {
+    const count = visibleScopes().length;
+    return h("div", { class: "tabs" + (count === 4 ? " four" : count === 2 ? " two" : ""), role: "tablist" },
+      visibleScopes().map((s) => h("button", {
         class: "tab" + (s.id === state.scope ? " active" : ""),
         role: "tab",
         "aria-selected": s.id === state.scope ? "true" : "false",
         onclick: () => switchScope(s.id),
-      }, s.tab)),
+      }, tabLabel(s))),
     );
   }
 
@@ -204,16 +234,19 @@
 
   function renderPlans() {
     const P = state.plans;
-    const activeScopes = ["f", "c"].filter((s) => P.pairs[s].status === "active");
+    const activeScopes = ["f", "c"].filter((s) => P.pairs[s].status === "active" && !sectionInfo(s).hidden);
     const header = h("div", { class: "topbar" },
       formatDate(P.today),
       h("div", { class: "actions" },
         activeScopes.length ? h("button", { class: "icon-btn", "aria-label": "Предложить план", onclick: () => openPlanSheet() }, icon("plus")) : null,
+        settingsButton(),
       ),
     );
     const page = [header, h("h1", null, "Планы"),
       h("p", { class: "subtitle legend-row" },
-        h("span", { class: "lg f" }), "с другом", h("span", { class: "lg c" }), "с парой", h("span", { class: "lg pending" }), "ждёт ответа"),
+        !sectionInfo("f").hidden ? [h("span", { class: "lg f" }), sectionInfo("f").name || "с другом"] : null,
+        !sectionInfo("c").hidden ? [h("span", { class: "lg c" }), sectionInfo("c").name || "с парой"] : null,
+        h("span", { class: "lg pending" }), "ждёт ответа"),
       renderTabs()];
 
     if (!activeScopes.length) {
@@ -374,7 +407,7 @@
   function openPlanSheet(day) {
     haptic("light");
     const P = state.plans;
-    const scopes = ["f", "c"].filter((s) => P.pairs[s].status === "active");
+    const scopes = ["f", "c"].filter((s) => P.pairs[s].status === "active" && !sectionInfo(s).hidden);
     const form = { scope: scopes[0], title: "", emoji: "📅", date: day && day >= P.today ? day : P.today, time: "", note: "" };
     openSheet(() => {
       const submit = h("button", { class: "btn", disabled: true, onclick: () => send() }, "Отправить предложение");
@@ -887,6 +920,106 @@
         submit,
       );
     });
+  }
+
+  // ---------- section settings ----------
+  function openSettingsSheet() {
+    haptic("light");
+    const DEFAULTS = { p: "Личные", f: "С другом", c: "Пара" };
+    const HEADINGS = { p: "🎯 Личный раздел", f: "🤝 Раздел с другом", c: "💞 Раздел для пары" };
+    const form = {};
+    ["p", "f", "c"].forEach((id) => { form[id] = { name: sectionInfo(id).name || "", hidden: Boolean(sectionInfo(id).hidden) }; });
+
+    openSheet(() => {
+      const blocks = ["p", "f", "c"].map((id) => {
+        const info = sectionInfo(id);
+        const input = h("input", {
+          class: "input", maxlength: "20", placeholder: DEFAULTS[id], value: form[id].name,
+          oninput: (e) => { form[id].name = e.target.value; },
+        });
+        let toggle = null;
+        if (id !== "p") {
+          const sw = h("button", {
+            class: "switch" + (form[id].hidden ? "" : " on"),
+            role: "switch",
+            "aria-checked": form[id].hidden ? "false" : "true",
+            onclick: () => {
+              form[id].hidden = !form[id].hidden;
+              sw.classList.toggle("on", !form[id].hidden);
+              sw.setAttribute("aria-checked", form[id].hidden ? "false" : "true");
+              haptic("select");
+            },
+          }, h("span"));
+          toggle = h("div", { class: "set-row" }, h("span", null, "Показывать вкладку"), sw);
+        }
+        let pairRow = null;
+        if (id !== "p") {
+          const status = info.pair === "active" ? "Связка: " + info.partner
+            : info.pair === "pending" ? "Приглашение отправлено, ждём ответа" : "Связки нет";
+          pairRow = h("div", { class: "set-row muted" },
+            h("span", null, status),
+            info.pair !== "none" ? h("button", { class: "link-danger", onclick: () => unpairSection(id, info) }, info.pair === "active" ? "Разорвать" : "Отменить") : null,
+          );
+        }
+        return h("div", { class: "panel set-block" },
+          h("div", { class: "set-title" }, HEADINGS[id]),
+          h("div", { class: "field-label" }, "Название вкладки"),
+          input,
+          toggle,
+          pairRow,
+        );
+      });
+
+      const save = h("button", {
+        class: "btn",
+        onclick: async () => {
+          save.disabled = true;
+          try {
+            for (const id of ["p", "f", "c"]) {
+              const info = sectionInfo(id);
+              const changed = (info.name || "") !== form[id].name.trim() || Boolean(info.hidden) !== form[id].hidden;
+              if (!changed) continue;
+              const body = { scope: id, name: form[id].name.trim() };
+              if (id !== "p") body.hidden = form[id].hidden;
+              const res = await api("/api/sections", { method: "POST", body });
+              state.sections = res.sections;
+            }
+            haptic("success");
+            closeSheet();
+            if (sectionInfo(state.scope).hidden) { state.scope = "p"; saveScope("p"); }
+            await refresh();
+            toast("Сохранено");
+          } catch (err) {
+            save.disabled = false;
+            toast(err.message);
+          }
+        },
+      }, "Сохранить");
+
+      return h("div", null,
+        h("h2", null, "Разделы"),
+        h("div", { class: "section-hint" }, "Названия и видимость вкладок — только для тебя. У второго участника всё останется как было."),
+        blocks,
+        save,
+      );
+    });
+  }
+
+  async function unpairSection(id, info) {
+    const text = info.pair === "active"
+      ? "Разорвать связку с " + info.partner + "? Общие привычки, отметки, настроение и планы будут удалены у вас обоих."
+      : "Отменить приглашение?";
+    if (!(await confirmDialog(text))) return;
+    try {
+      const res = await api("/api/unpair", { method: "POST", body: { scope: id } });
+      state.sections = res.sections;
+      haptic("success");
+      closeSheet();
+      await refresh();
+      toast(info.pair === "active" ? "Связка разорвана" : "Приглашение отменено");
+    } catch (err) {
+      toast(err.message);
+    }
   }
 
   // ---------- reorder & pin ----------

@@ -103,6 +103,8 @@ class WebApi:
         app.router.add_post("/api/plans", self._add_plan)
         app.router.add_post("/api/plans/{plan_id:\\d+}/respond", self._respond_plan)
         app.router.add_delete("/api/plans/{plan_id:\\d+}", self._cancel_plan)
+        app.router.add_post("/api/sections", self._update_section)
+        app.router.add_post("/api/unpair", self._unpair)
         app.router.add_post("/api/invite", self._invite)
         app.router.add_post("/api/mood", self._mood)
         return app
@@ -239,6 +241,7 @@ class WebApi:
             "habits": [],
             "progress": {"done": 0, "total": 0},
             "mood": None,
+            "sections": self._sections(user_id),
         }
         if scope != "p":
             status = self._pair_status(pair)
@@ -423,6 +426,48 @@ class WebApi:
         self.db.reorder(ids, set(pinned))
         return web.json_response({"ok": True})
 
+    # ---- sections (per-user names / visibility) -------------------------------
+
+    def _sections(self, user_id: int) -> dict[str, Any]:
+        settings = self.db.mode_settings(user_id)
+        result: dict[str, Any] = {}
+        for scope in SCOPES:
+            name, hidden = settings[scope]
+            item: dict[str, Any] = {"name": name, "hidden": hidden}
+            if scope != "p":
+                pair = self._pair_for(user_id, scope)
+                item["pair"] = self._pair_status(pair)
+                item["partner"] = (
+                    self.db.user_name(pair.other(user_id)) if pair is not None and pair.is_complete else None
+                )
+            result[scope] = item
+        return result
+
+    async def _update_section(self, request: web.Request) -> web.Response:
+        user_id = request["user_id"]
+        data = await self._json(request)
+        scope = self._scope(data.get("scope"))
+        name, hidden = data.get("name"), data.get("hidden")
+        if name is not None and not isinstance(name, str):
+            raise ApiError("Некорректное название")
+        if hidden is not None and not isinstance(hidden, bool):
+            raise ApiError("Некорректный запрос")
+        try:
+            self.db.set_mode_settings(user_id, scope, name=name, hidden=hidden)
+        except ValueError as exc:
+            raise ApiError("Личный раздел скрыть нельзя") from exc
+        return web.json_response({"sections": self._sections(user_id)})
+
+    async def _unpair(self, request: web.Request) -> web.Response:
+        user_id = request["user_id"]
+        data = await self._json(request)
+        scope = self._scope(data.get("scope"))
+        if scope == "p":
+            raise ApiError("В личном разделе нет связки")
+        if not await self.handlers.unpair(self.bot, user_id, scope):
+            raise ApiError("Связки нет", 404)
+        return web.json_response({"sections": self._sections(user_id)})
+
     # ---- plans -----------------------------------------------------------------
 
     def _plan_payload(self, plan: Plan, user_id: int, pairs: dict[int, Pair]) -> dict[str, Any]:
@@ -479,6 +524,7 @@ class WebApi:
                     }
                     for s, p in pairs.items()
                 },
+                "sections": self._sections(user_id),
                 "plans": [self._plan_payload(p, user_id, by_id) for p in plans],
                 "upcoming": [self._plan_payload(p, user_id, by_id) for p in upcoming],
                 "incoming": [self._plan_payload(p, user_id, by_id) for p in incoming],

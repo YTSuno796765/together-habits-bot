@@ -333,3 +333,33 @@ def test_plan_validation():
         assert sorted(p["scope"] for p in plans) == ["c", "f"]
 
     run(body)
+
+
+def test_sections_and_unpair():
+    async def body(env):
+        state = (await env.call("GET", "/api/state?scope=p"))[1]
+        assert state["sections"]["f"] == {"name": None, "hidden": False, "pair": "none", "partner": None}
+
+        status, res = await env.call("POST", "/api/sections", json={"scope": "f", "name": "С Мишей"})
+        assert status == 200 and res["sections"]["f"]["name"] == "С Мишей"
+        status, res = await env.call("POST", "/api/sections", json={"scope": "c", "hidden": True})
+        assert res["sections"]["c"]["hidden"] is True
+        assert (await env.call("POST", "/api/sections", json={"scope": "p", "hidden": True}))[0] == 400
+        assert (await env.call("POST", "/api/sections", json={"scope": "f", "name": 5}))[0] == 400
+        assert (await env.call("POST", "/api/sections", json={"scope": "f", "hidden": "no"}))[0] == 400
+        # Settings are personal: the other user still sees defaults.
+        other = (await env.call("GET", "/api/state?scope=p", user=2))[1]["sections"]
+        assert other["f"]["name"] is None and other["c"]["hidden"] is False
+
+        await make_pair(env, "f")
+        await env.call("POST", "/api/habits", json={"scope": "f", "title": "Зал"})
+        assert (await env.call("GET", "/api/plans"))[1]["sections"]["f"]["partner"] == "U2"
+
+        assert (await env.call("POST", "/api/unpair", json={"scope": "p"}))[0] == 400
+        status, res = await env.call("POST", "/api/unpair", json={"scope": "f"})
+        assert status == 200 and res["sections"]["f"]["pair"] == "none"
+        assert env.bot.sent[-1][0] == 2 and "разрывает связку" in env.bot.sent[-1][1]
+        assert env.db.get_pair(2, "friend") is None
+        assert (await env.call("POST", "/api/unpair", json={"scope": "f"}))[0] == 404
+
+    run(body)

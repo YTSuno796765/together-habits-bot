@@ -62,6 +62,13 @@ CREATE TABLE IF NOT EXISTS plans (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS plans_pair_day ON plans (pair_id, day);
+CREATE TABLE IF NOT EXISTS user_modes (
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    scope TEXT NOT NULL CHECK (scope IN ('p', 'f', 'c')),
+    name TEXT,
+    hidden INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (user_id, scope)
+);
 CREATE TABLE IF NOT EXISTS moods (
     pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,
     user_id INTEGER NOT NULL REFERENCES users(id),
@@ -472,4 +479,36 @@ class Storage:
 
     def delete_plan(self, plan_id: int) -> None:
         self.conn.execute("DELETE FROM plans WHERE id = ?", (plan_id,))
+        self.conn.commit()
+
+    # ---- per-user section settings ------------------------------------------
+
+    def mode_settings(self, user_id: int) -> dict[str, tuple[str | None, bool]]:
+        """scope -> (custom name or None, hidden) for p/f/c."""
+        result: dict[str, tuple[str | None, bool]] = {s: (None, False) for s in ("p", "f", "c")}
+        rows = self.conn.execute(
+            "SELECT scope, name, hidden FROM user_modes WHERE user_id = ?", (user_id,)
+        )
+        for row in rows:
+            result[row["scope"]] = (row["name"] or None, bool(row["hidden"]))
+        return result
+
+    def set_mode_settings(
+        self, user_id: int, scope: str, *, name: str | None = None, hidden: bool | None = None
+    ) -> None:
+        """Update a section's name ("" resets to default) and/or visibility."""
+        if scope not in ("p", "f", "c"):
+            raise ValueError(f"unknown scope: {scope}")
+        if scope == "p" and hidden:
+            raise ValueError("the personal section cannot be hidden")
+        current_name, current_hidden = self.mode_settings(user_id)[scope]
+        if name is not None:
+            current_name = name.strip()[:20] or None
+        if hidden is not None:
+            current_hidden = hidden
+        self.conn.execute(
+            "INSERT INTO user_modes (user_id, scope, name, hidden) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(user_id, scope) DO UPDATE SET name = excluded.name, hidden = excluded.hidden",
+            (user_id, scope, current_name, int(current_hidden)),
+        )
         self.conn.commit()

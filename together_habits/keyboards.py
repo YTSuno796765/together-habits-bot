@@ -7,7 +7,7 @@ from telegram import InlineKeyboardMarkup as Markup
 from telegram import WebAppInfo
 
 from together_habits.logic import MOOD_EMOJI
-from together_habits.texts import TEMPLATES
+from together_habits.texts import SCOPE_TITLE, TEMPLATES
 
 BACK_MENU = Btn("⬅️ В меню", callback_data="menu")
 
@@ -18,12 +18,18 @@ def app_button(webapp_url: str | None) -> list[list[Btn]]:
     return [[Btn("📱 Открыть приложение", web_app=WebAppInfo(url=webapp_url))]]
 
 
-def main_menu(webapp_url: str | None = None) -> Markup:
+def main_menu(
+    webapp_url: str | None = None,
+    titles: dict[str, str] | None = None,
+    hidden: set[str] | frozenset[str] = frozenset(),
+) -> Markup:
+    titles = {**SCOPE_TITLE, **(titles or {})}
+    shared = [Btn(titles[s], callback_data=f"mode:{s}") for s in ("f", "c") if s not in hidden]
     return Markup(
         app_button(webapp_url)
+        + ([shared] if shared else [])
         + [
-            [Btn("🤝 С другом", callback_data="mode:f"), Btn("💞 Для пары", callback_data="mode:c")],
-            [Btn("🎯 Личный рост", callback_data="mode:p")],
+            [Btn(titles["p"], callback_data="mode:p")],
             [Btn("✅ Отметить сегодня", callback_data="today")],
             [Btn("⏰ Напоминания", callback_data="rem"), Btn("❓ Помощь", callback_data="help")],
         ]

@@ -49,9 +49,9 @@ input { font: inherit; color: inherit; }
 .topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 52px; }
 .date { color: var(--muted); font-size: 14px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
 .date b { color: var(--text); font-weight: 800; }
-.actions { display: flex; gap: 10px; }
+.actions { display: flex; gap: 8px; }
 .icon-btn {
-  width: 48px; height: 48px; border-radius: 50%;
+  width: 44px; height: 44px; border-radius: 50%;
   display: grid; place-items: center;
   background: var(--surface); border: 1px solid var(--line);
   transition: transform .15s ease, background .15s ease;
@@ -76,6 +76,8 @@ h1 { font-size: 40px; line-height: 1.05; font-weight: 800; letter-spacing: -0.03
 .tab.active { background: var(--mint); color: var(--mint-ink); }
 .tabs.four { grid-template-columns: repeat(4, 1fr); }
 .tabs.four .tab { font-size: 13px; padding: 0 2px; }
+.tabs.two { grid-template-columns: repeat(2, 1fr); }
+.tab { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 0 6px; }
 
 /* ---------- progress ---------- */
 .panel {
@@ -363,6 +365,18 @@ h1 { font-size: 40px; line-height: 1.05; font-weight: 800; letter-spacing: -0.03
 .plan-note { color: var(--text); line-height: 1.4; }
 .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .input[type="date"], .input[type="time"] { color-scheme: dark; }
+
+/* ---------- section settings ---------- */
+.set-block { padding: 16px 16px 14px; margin-bottom: 12px; }
+.set-title { font-weight: 800; font-size: 16px; }
+.set-block .field-label { margin-top: 12px; }
+.set-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 14px; font-size: 15px; }
+.set-row.muted { color: var(--muted); font-size: 14px; }
+.switch { width: 50px; height: 30px; border-radius: 999px; background: var(--line); position: relative; flex-shrink: 0; transition: background .2s; }
+.switch span { position: absolute; top: 3px; left: 3px; width: 24px; height: 24px; border-radius: 50%; background: #fff; transition: transform .2s; }
+.switch.on { background: var(--mint); }
+.switch.on span { transform: translateX(20px); }
+.link-danger { color: var(--missed); font-weight: 800; font-size: 14px; flex-shrink: 0; }
 
 /* ---------- reorder sheet ---------- */
 .sort-list { display: flex; flex-direction: column; gap: 8px; }

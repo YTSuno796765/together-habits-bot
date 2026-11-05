@@ -201,3 +201,18 @@ def test_plan_buttons_in_bot(hx):
     assert hx.bot.sent[-1][0] == 1 and "принят" in hx.bot.sent[-1][1]
     again = hx.press(2, f"plan:{plan.id}:n")
     assert "уже ответили" in again.edits[-1][0]
+
+
+def test_bot_menu_uses_custom_names(hx):
+    hx.start(1)
+    hx.db.set_mode_settings(1, "f", name="Миша & Ко")
+    hx.db.set_mode_settings(1, "c", hidden=True)
+    menu = hx.start(1).replies[-1][1].to_dict()["inline_keyboard"]
+    labels = [b["text"] for row in menu for b in row]
+    assert "🤝 Миша & Ко" in labels
+    assert not any("пары" in label for label in labels)
+    listing = hx.press(1, "today")
+    assert listing.edits[-1] is not None
+    pair_up(hx, "f")
+    habit_list = hx.press(1, "list:f")
+    assert habit_list.edits[-1][0].startswith("🤝 Миша &amp; Ко")

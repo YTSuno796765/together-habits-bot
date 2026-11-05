@@ -136,3 +136,18 @@ def test_order_and_pin(db):
     # New habits go to the end.
     db.add_habit("D", owner_id=1)
     assert db.list_habits(owner_id=1)[-1].title == "D"
+
+
+def test_mode_settings(db):
+    assert db.mode_settings(1) == {"p": (None, False), "f": (None, False), "c": (None, False)}
+    db.set_mode_settings(1, "f", name="  С Мишей  ")
+    db.set_mode_settings(1, "c", hidden=True)
+    assert db.mode_settings(1)["f"] == ("С Мишей", False)
+    assert db.mode_settings(1)["c"] == (None, True)
+    db.set_mode_settings(1, "f", name="")  # reset to default
+    assert db.mode_settings(1)["f"] == (None, False)
+    assert db.mode_settings(2)["c"] == (None, False)  # per user
+    with pytest.raises(ValueError):
+        db.set_mode_settings(1, "p", hidden=True)
+    db.set_mode_settings(1, "c", name="x" * 50)
+    assert len(db.mode_settings(1)["c"][0]) == 20

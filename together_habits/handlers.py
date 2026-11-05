@@ -6,6 +6,7 @@ import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from html import escape
+from html import unescape as html_unescape
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -109,6 +110,38 @@ class Handlers:
         except TelegramError as exc:  # partner blocked the bot, etc.
             log.info("Could not notify user: %s", exc)
 
+    def scope_title(self, user_id: int, scope: str) -> str:
+        """Section title with the user's custom name, e.g. '🤝 Миша'."""
+        name, _ = self.db.mode_settings(user_id)[scope]
+        if not name:
+            return SCOPE_TITLE[scope]
+        return f"{SCOPE_TITLE[scope].split(' ', 1)[0]} {escape(name)}"
+
+    def _menu(self, update: Update) -> Any:
+        user = update.effective_user
+        if user is None:
+            return kb.main_menu(self.webapp_url)
+        settings = self.db.mode_settings(user.id)
+        titles = {scope: html_unescape(self.scope_title(user.id, scope)) for scope in SCOPES}
+        hidden = {scope for scope, (_, is_hidden) in settings.items() if is_hidden}
+        return kb.main_menu(self.webapp_url, titles, hidden)
+
+    async def unpair(self, bot: Any, user_id: int, scope: str) -> bool:
+        """Remove the user's pair in a shared section; tell the partner. True if removed."""
+        pair = self.db.get_pair(user_id, SCOPE_KIND[scope])
+        if pair is None:
+            return False
+        self.db.delete_pair(pair.id)
+        partner_id = pair.other(user_id) if pair.is_complete else None
+        if partner_id is not None:
+            await self.send(
+                bot,
+                partner_id,
+                f"💔 {self._name(user_id)} разрывает связку в режиме "
+                f"{self.scope_title(partner_id, scope)}. Общие привычки и планы удалены.",
+            )
+        return True
+
     def _view(self, user_id: int, scope: str) -> ScopeView | None:
         """Habits for a scope; None if a shared scope has no complete pair yet."""
         if scope == "p":
@@ -132,11 +165,11 @@ class Handlers:
         if context.args and context.args[0].startswith("join_"):
             await self._join(update, context, user_id, context.args[0].removeprefix("join_"))
             return
-        await self._show(update, WELCOME.format(name=self._name(user_id)), kb.main_menu(self.webapp_url))
+        await self._show(update, WELCOME.format(name=self._name(user_id)), self._menu(update))
 
     async def help(self, update: Update, context: Context) -> None:
         self._register(update)
-        await self._show(update, HELP, kb.main_menu(self.webapp_url))
+        await self._show(update, HELP, self._menu(update))
 
     async def today_cmd(self, update: Update, context: Context) -> None:
         user_id = self._register(update)
@@ -158,9 +191,9 @@ class Handlers:
 
         if action == "menu":
             context.user_data.pop("awaiting", None)
-            await self._show(update, WELCOME.format(name=self._name(user_id)), kb.main_menu(self.webapp_url))
+            await self._show(update, WELCOME.format(name=self._name(user_id)), self._menu(update))
         elif action == "help":
-            await self._show(update, HELP, kb.main_menu(self.webapp_url))
+            await self._show(update, HELP, self._menu(update))
         elif action == "today":
             await self._today_overview(update, user_id)
         elif action in {"mode", "list", "add", "stats", "manage", "custom", "invite", "unpair", "unpairok"}:
@@ -230,7 +263,7 @@ class Handlers:
         try:
             self.db.create_invite(user_id, SCOPE_KIND[scope])
         except PairError as exc:
-            await self._show(update, escape(str(exc)), kb.main_menu(self.webapp_url))
+            await self._show(update, escape(str(exc)), self._menu(update))
             return
         await self._mode(update, context, user_id, scope)
 
@@ -238,20 +271,20 @@ class Handlers:
         try:
             pair = self.db.join_pair(code, user_id)
         except PairError as exc:
-            await self._show(update, "😕 " + escape(str(exc)), kb.main_menu(self.webapp_url))
+            await self._show(update, "😕 " + escape(str(exc)), self._menu(update))
             return
         scope = KIND_SCOPE[pair.kind]
         owner = pair.owner_id
         await self._notify(
             context,
             owner,
-            f"🎉 <b>{self._name(user_id)}</b> присоединяется к тебе в режиме {SCOPE_TITLE[scope]}!\n"
+            f"🎉 <b>{self._name(user_id)}</b> присоединяется к тебе в режиме {self.scope_title(owner, scope)}!\n"
             "Добавляйте привычки и отмечайтесь каждый день.",
             kb.mode_menu(scope),
         )
         await self._show(
             update,
-            f"🎉 Готово! Вы в связке с <b>{self._name(owner)}</b> — {SCOPE_TITLE[scope]}.",
+            f"🎉 Готово! Вы в связке с <b>{self._name(owner)}</b> — {self.scope_title(user_id, scope)}.",
             kb.mode_menu(scope),
         )
 
@@ -274,15 +307,7 @@ class Handlers:
     async def _unpairok(self, update: Update, context: Context, user_id: int, scope: str) -> None:
         if scope == "p":
             return
-        pair = self.db.get_pair(user_id, SCOPE_KIND[scope])
-        if pair is not None:
-            self.db.delete_pair(pair.id)
-            if pair.is_complete:
-                await self._notify(
-                    context,
-                    pair.other(user_id),
-                    f"💔 {self._name(user_id)} разрывает связку в режиме {SCOPE_TITLE[scope]}.",
-                )
+        await self.unpair(context.bot, user_id, scope)
         await self._mode(update, context, user_id, scope)
 
     # ---- habits ------------------------------------------------------------
@@ -316,7 +341,7 @@ class Handlers:
         scope = context.user_data.pop("awaiting", None)
         message = update.effective_message
         if scope is None or message is None:
-            await self._show(update, "Выбери действие в меню 👇", kb.main_menu(self.webapp_url))
+            await self._show(update, "Выбери действие в меню 👇", self._menu(update))
             return
         emoji, title = _split_emoji(message.text or "")
         await self._create_habit(update, user_id, scope, emoji, title)
@@ -330,7 +355,7 @@ class Handlers:
     async def _create_habit(self, update: Update, user_id: int, scope: str, emoji: str, title: str) -> None:
         view = self._view(user_id, scope)
         if view is None:
-            await self._show(update, "Сначала нужно собрать связку в этом режиме.", kb.main_menu(self.webapp_url))
+            await self._show(update, "Сначала нужно собрать связку в этом режиме.", self._menu(update))
             return
         owner = user_id if scope == "p" else None
         pair_id = view.pair.id if view.pair else None
@@ -391,7 +416,7 @@ class Handlers:
             prefix = "🚫 " if habit.is_avoid else ""
             items.append((habit.id, f"{mark} {prefix}{habit.emoji} {habit.title}"))
 
-        header = f"{SCOPE_TITLE[scope]} — {today.strftime('%d.%m')}\n\n"
+        header = f"{self.scope_title(user_id, scope)} — {today.strftime('%d.%m')}\n\n"
         if not items:
             body = "Привычек пока нет — добавь первую!"
         elif partner_id is not None:
@@ -442,8 +467,9 @@ class Handlers:
                 h for h in view.habits if not h.is_avoid and logic.is_scheduled(h.schedule, today)
             ]
             done = sum(1 for h in todo if user_id in self.db.checkins(h.id).get(today, set()))
-            lines.append(f"{SCOPE_TITLE[scope]}: {done}/{len(todo)}")
-            buttons.append([kb.Btn(SCOPE_TITLE[scope], callback_data=f"list:{scope}")])
+            title = self.scope_title(user_id, scope)
+            lines.append(f"{title}: {done}/{len(todo)}")
+            buttons.append([kb.Btn(html_unescape(title), callback_data=f"list:{scope}")])
         buttons.append([kb.BACK_MENU])
         await self._show(update, "\n".join(lines), kb.Markup(buttons))
 
@@ -456,7 +482,7 @@ class Handlers:
             return
         today = self.today()
         members = view.pair.members if view.pair else frozenset({user_id})
-        blocks = [f"📊 <b>{SCOPE_TITLE[scope]}</b> — последние 7 дней"]
+        blocks = [f"📊 <b>{self.scope_title(user_id, scope)}</b> — последние 7 дней"]
         all_checkins = []
         for habit in view.habits:
             checkins = self.db.checkins(habit.id)
@@ -507,7 +533,7 @@ class Handlers:
             await self._show(
                 update,
                 "Трекер настроения работает в режиме 💞 «Для пары». Сначала пригласи партнёра.",
-                kb.main_menu(self.webapp_url),
+                self._menu(update),
             )
             return
         await self._show(update, "Как ты сегодня? 💭", kb.mood_menu())
@@ -596,13 +622,13 @@ class Handlers:
         try:
             plan = await self.respond_plan(context.bot, plan_id, user_id, accept)
         except PairError as exc:
-            await self._show(update, "😕 " + escape(str(exc)), kb.main_menu(self.webapp_url))
+            await self._show(update, "😕 " + escape(str(exc)), self._menu(update))
             return
         result = "✅ Ты принимаешь этот план" if plan.status == "accepted" else "❌ Ты отклоняешь этот план"
         await self._show(
             update,
             f"📅 Предложение от <b>{self._name(plan.author_id)}</b>:\n\n{self.plan_card(plan)}\n\n{result}",
-            kb.main_menu(self.webapp_url),
+            self._menu(update),
         )
 
     # ---- reminders ---------------------------------------------------------
