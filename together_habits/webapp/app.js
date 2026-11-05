@@ -42,6 +42,9 @@
     back: '<path d="M15 5l-7 7 7 7" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" fill="none"/>',
     flame: '<path fill="currentColor" d="M12.6 2.2c.5 3-1.1 4.6-2.6 6.2C8.6 9.9 7 11.6 7 14.3A5 5 0 0 0 12 19.5a5 5 0 0 0 5-5.2c0-2.3-1.2-3.6-2-4.5.1 1.5-.4 2.6-1.4 3.1.5-3.4-.1-7.3-1-10.7zM12 21.8c-1.9 0-3.4-1.4-3.4-3.2 0-1.6 1.1-2.5 2-3.4.7-.7 1.3-1.4 1.4-2.5 1.4 1.1 3.4 2.9 3.4 5.6 0 1.9-1.5 3.5-3.4 3.5z" opacity=".95"/>',
     shield: '<path fill="currentColor" d="M12 2.5l7.5 3v6c0 4.6-3.2 8.6-7.5 10-4.3-1.4-7.5-5.4-7.5-10v-6z"/><path d="M8.5 12.2l2.4 2.4 4.6-4.8" stroke="#1b1724" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>',
+    sort: '<path d="M7 4v16M7 4L3.5 7.5M7 4l3.5 3.5M17 20V4m0 16l-3.5-3.5M17 20l3.5-3.5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>',
+    pin: '<path fill="currentColor" d="M14.6 2.6l6.8 6.8-2.1.7-3.6 3.6.4 4.3-1.6 1.6-3.9-3.9-5.5 5.5-1.4-1.4 5.5-5.5L5.3 10.4 6.9 8.8l4.3.4 3.6-3.6z"/>',
+    grip: '<path d="M9 6h.01M15 6h.01M9 12h.01M15 12h.01M9 18h.01M15 18h.01" stroke="currentColor" stroke-width="3.2" stroke-linecap="round"/>',
     share: '<path d="M12 3v12M7 8l5-5 5 5M5 14v5a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>',
   };
   function icon(name) {
@@ -141,6 +144,7 @@
     const header = h("div", { class: "topbar" },
       formatDate(d.today),
       h("div", { class: "actions" },
+        pairActive && d.habits.length > 1 ? h("button", { class: "icon-btn", "aria-label": "Порядок привычек", onclick: openOrderSheet }, icon("sort")) : null,
         pairActive && d.habits.length ? h("button", { class: "icon-btn", "aria-label": "Статистика", onclick: openStats }, icon("chart")) : null,
         pairActive ? h("button", { class: "icon-btn", "aria-label": "Добавить привычку", onclick: () => openAddSheet("do") }, icon("plus")) : null,
       ),
@@ -207,9 +211,11 @@
   function renderHabitSections(d) {
     const doHabits = d.habits.filter((x) => x.kind !== "avoid");
     const avoid = d.habits.filter((x) => x.kind === "avoid");
-    const todo = doHabits.filter((x) => x.dueToday && !x.meDone);
-    const done = doHabits.filter((x) => x.dueToday && x.meDone);
-    const off = doHabits.filter((x) => !x.dueToday);
+    const pinned = doHabits.filter((x) => x.pinned);
+    const rest = doHabits.filter((x) => !x.pinned);
+    const todo = rest.filter((x) => x.dueToday && !x.meDone);
+    const done = rest.filter((x) => x.dueToday && x.meDone);
+    const off = rest.filter((x) => !x.dueToday);
     const grid = (items) => h("div", { class: "grid" }, items.map(habitCard));
     const out = [];
     if (!doHabits.length) {
@@ -220,6 +226,7 @@
         h("button", { class: "btn", onclick: () => openAddSheet("do") }, icon("plus"), "Добавить привычку"),
       ));
     }
+    if (pinned.length) out.push(h("div", { class: "section-title" }, "📌 Закреплено"), grid(pinned));
     if (todo.length) out.push(h("div", { class: "section-title" }, "Сделать"), grid(todo));
     if (done.length) out.push(h("div", { class: "section-title" }, "Готово"), grid(done));
     if (off.length) out.push(h("div", { class: "section-title" }, "Не сегодня"), grid(off));
@@ -264,9 +271,9 @@
         onclick: (e) => { e.stopPropagation(); toggle(x, e.currentTarget); },
       }, icon("check"));
 
-    const meta = isAvoid
+    const meta = (x.pinned ? "📌 " : "") + (isAvoid
       ? (x.meMarked ? "срыв сегодня" : x.partnerMarked ? "срыв у " + state.data.pair.partner : "держусь")
-      : x.scheduleLabel;
+      : x.scheduleLabel);
 
     return h("div", { class: classes.join(" "), role: "button", tabindex: "0", onclick: () => openHabitSheet(x) },
       h("div", { class: "habit-top" }, h("div", { class: "habit-icon" }, x.emoji), action),
@@ -623,6 +630,114 @@
     });
   }
 
+  // ---------- reorder & pin ----------
+  function sortableList(items, pinnedIds) {
+    const list = h("div", { class: "sort-list" });
+    const lastPinned = () => {
+      let last = null;
+      for (const row of list.children) if (pinnedIds.has(Number(row.dataset.id))) last = row;
+      return last;
+    };
+    items.forEach((x) => {
+      const pinBtn = h("button", {
+        class: "sort-pin" + (pinnedIds.has(x.id) ? " on" : ""),
+        "aria-label": "Закрепить",
+        onclick: () => {
+          const id = x.id;
+          const anchor = lastPinned();
+          if (pinnedIds.has(id)) {
+            pinnedIds.delete(id);
+            const after = lastPinned();
+            list.insertBefore(row, after ? after.nextSibling : list.firstChild);
+          } else {
+            pinnedIds.add(id);
+            list.insertBefore(row, anchor ? anchor.nextSibling : list.firstChild);
+          }
+          pinBtn.classList.toggle("on", pinnedIds.has(id));
+          haptic("select");
+        },
+      }, icon("pin"));
+      const handle = h("div", { class: "sort-handle", "aria-label": "Перетащить" }, icon("grip"));
+      const row = h("div", { class: "sort-row", "data-id": String(x.id) },
+        h("div", { class: "sort-emoji" }, x.emoji),
+        h("div", { class: "sort-title" }, x.title),
+        pinBtn,
+        handle,
+      );
+      let startY = 0;
+      handle.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        startY = e.clientY;
+        handle.setPointerCapture(e.pointerId);
+        row.classList.add("dragging");
+        haptic("light");
+      });
+      handle.addEventListener("pointermove", (e) => {
+        if (!row.classList.contains("dragging")) return;
+        let dy = e.clientY - startY;
+        const prev = row.previousElementSibling;
+        const next = row.nextElementSibling;
+        const oldTop = row.offsetTop;
+        if (dy < 0 && prev && e.clientY < prev.getBoundingClientRect().top + prev.offsetHeight / 2) {
+          list.insertBefore(row, prev);
+        } else if (dy > 0 && next && e.clientY > next.getBoundingClientRect().top + next.offsetHeight / 2) {
+          list.insertBefore(row, next.nextSibling);
+        }
+        const moved = row.offsetTop - oldTop;
+        if (moved) {
+          startY += moved;
+          dy = e.clientY - startY;
+          haptic("select");
+        }
+        row.style.transform = "translateY(" + dy + "px)";
+      });
+      const end = () => {
+        row.classList.remove("dragging");
+        row.style.transform = "";
+      };
+      handle.addEventListener("pointerup", end);
+      handle.addEventListener("pointercancel", end);
+      list.append(row);
+    });
+    return { el: list, ids: () => Array.from(list.children, (row) => Number(row.dataset.id)) };
+  }
+
+  function openOrderSheet() {
+    haptic("light");
+    const habits = state.data.habits;
+    const pinnedIds = new Set(habits.filter((x) => x.pinned).map((x) => x.id));
+    const doList = sortableList(habits.filter((x) => x.kind !== "avoid"), pinnedIds);
+    const avoidList = sortableList(habits.filter((x) => x.kind === "avoid"), pinnedIds);
+    const shared = state.scope !== "p";
+    openSheet(() => {
+      const save = h("button", {
+        class: "btn",
+        onclick: async () => {
+          save.disabled = true;
+          const ids = doList.ids().concat(avoidList.ids());
+          try {
+            await api("/api/order", { method: "POST", body: { scope: state.scope, ids, pinned: Array.from(pinnedIds) } });
+            haptic("success");
+            closeSheet();
+            await refresh();
+            toast("Порядок сохранён");
+          } catch (err) {
+            save.disabled = false;
+            toast(err.message);
+          }
+        },
+      }, "Сохранить");
+      return h("div", null,
+        h("h2", null, "Порядок"),
+        h("div", { class: "section-hint" },
+          "Тяни за ⠿, чтобы переставить. 📌 — закрепить наверху." + (shared ? " Порядок общий для вас обоих." : "")),
+        doList.el.children.length ? [h("div", { class: "field-label" }, "Делать"), doList.el] : null,
+        avoidList.el.children.length ? [h("div", { class: "field-label" }, "Не делать"), avoidList.el] : null,
+        save,
+      );
+    });
+  }
+
   function openHabitSheet(x) {
     haptic("light");
     openSheet(() => h("div", null,
@@ -636,7 +751,21 @@
       h("div", { class: "week", style: "margin:18px 0 6px" }, x.week.map((w) => h("span", { class: "seg " + w.status }))),
       h("div", { class: "labels" }, WEEKDAYS.map((w) => h("span", null, w))),
       h("button", {
-        class: "btn danger", style: "margin-top:26px",
+        class: "btn ghost", style: "margin-top:26px",
+        onclick: async () => {
+          try {
+            await api("/api/habits/" + x.id + "/pin", { method: "POST", body: { pinned: !x.pinned } });
+            haptic("success");
+            closeSheet();
+            await refresh();
+            toast(x.pinned ? "Откреплено" : "Закреплено наверху 📌");
+          } catch (err) {
+            toast(err.message);
+          }
+        },
+      }, icon("pin"), x.pinned ? "Открепить" : "Закрепить наверху"),
+      h("button", {
+        class: "btn danger",
         onclick: async () => {
           const ok = await confirmDialog("Удалить «" + x.title + "»? История отметок пропадёт.");
           if (!ok) return;

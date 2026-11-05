@@ -295,6 +295,29 @@ h1 { font-size: 40px; line-height: 1.05; font-weight: 800; letter-spacing: -0.03
 .detail-head .habit-icon { width: 60px; height: 60px; font-size: 32px; border-radius: 18px; }
 .detail-head h2 { margin: 0 0 4px; }
 
+/* ---------- reorder sheet ---------- */
+.sort-list { display: flex; flex-direction: column; gap: 8px; }
+.sort-row {
+  display: flex; align-items: center; gap: 12px; height: 58px; padding: 0 6px 0 12px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 16px;
+  position: relative; user-select: none; -webkit-user-select: none;
+}
+.sort-row.dragging {
+  z-index: 2; background: var(--surface-2); border-color: var(--mint);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, .5);
+}
+.sort-emoji { font-size: 22px; width: 32px; text-align: center; flex-shrink: 0; }
+.sort-title { flex: 1; min-width: 0; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sort-pin { width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; color: var(--dim); flex-shrink: 0; }
+.sort-pin svg { width: 18px; height: 18px; }
+.sort-pin.on { color: var(--mint); background: rgba(127, 224, 207, .12); }
+.sort-handle {
+  width: 44px; height: 48px; display: grid; place-items: center; color: var(--muted);
+  touch-action: none; cursor: grab; flex-shrink: 0;
+}
+.sort-handle svg { width: 20px; height: 20px; }
+.sort-row.dragging .sort-handle { cursor: grabbing; color: var(--mint); }
+
 /* ---------- misc ---------- */
 .toast {
   position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom)); z-index: 40;

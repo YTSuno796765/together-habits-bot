@@ -11,6 +11,7 @@ from pathlib import Path
 PAIR_KINDS = ("friend", "couple")
 EVERY_DAY = 0b1111111
 HABIT_KINDS = ("do", "avoid")
+HABIT_ORDER = "ORDER BY pinned DESC, position, id"
 MAX_HABITS_PER_SCOPE = 15
 
 SCHEMA = """
@@ -36,6 +37,8 @@ CREATE TABLE IF NOT EXISTS habits (
     pair_id INTEGER REFERENCES pairs(id) ON DELETE CASCADE,
     schedule INTEGER NOT NULL DEFAULT 127,
     kind TEXT NOT NULL DEFAULT 'do',
+    position INTEGER NOT NULL DEFAULT 0,
+    pinned INTEGER NOT NULL DEFAULT 0,
     archived INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CHECK ((owner_id IS NULL) <> (pair_id IS NULL))
@@ -93,6 +96,8 @@ class Habit:
     schedule: int = EVERY_DAY  # bit N set = weekday N (Monday = 0)
     created: date | None = None
     kind: str = "do"  # "do": check in when done; "avoid": check in only on a slip
+    pinned: bool = False
+    position: int = 0
 
     @property
     def is_avoid(self) -> bool:
@@ -116,6 +121,10 @@ class Storage:
             self.conn.execute("ALTER TABLE habits ADD COLUMN schedule INTEGER NOT NULL DEFAULT 127")
         if "kind" not in columns:
             self.conn.execute("ALTER TABLE habits ADD COLUMN kind TEXT NOT NULL DEFAULT 'do'")
+        if "position" not in columns:
+            self.conn.execute("ALTER TABLE habits ADD COLUMN position INTEGER NOT NULL DEFAULT 0")
+        if "pinned" not in columns:
+            self.conn.execute("ALTER TABLE habits ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
 
     def close(self) -> None:
         self.conn.close()
@@ -228,6 +237,8 @@ class Storage:
             row["schedule"],
             created,
             row["kind"],
+            bool(row["pinned"]),
+            row["position"],
         )
 
     def add_habit(
@@ -254,10 +265,15 @@ class Storage:
         if len(self.list_habits(owner_id=owner_id, pair_id=pair_id)) >= MAX_HABITS_PER_SCOPE:
             raise ValueError("too many habits")
         created_at = (created or date.today()).isoformat() + " 00:00:00"
+        scope_column = "owner_id" if owner_id is not None else "pair_id"
+        row = self.conn.execute(
+            f"SELECT COALESCE(MAX(position), -1) + 1 AS next FROM habits WHERE {scope_column} = ?",
+            (owner_id if owner_id is not None else pair_id,),
+        ).fetchone()
         cur = self.conn.execute(
-            "INSERT INTO habits (title, emoji, owner_id, pair_id, schedule, created_at, kind) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (title, emoji, owner_id, pair_id, schedule, created_at, kind),
+            "INSERT INTO habits (title, emoji, owner_id, pair_id, schedule, created_at, kind, position) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (title, emoji, owner_id, pair_id, schedule, created_at, kind, row["next"]),
         )
         self.conn.commit()
         habit = self.get_habit(cur.lastrowid)
@@ -273,13 +289,31 @@ class Storage:
     def list_habits(self, *, owner_id: int | None = None, pair_id: int | None = None) -> list[Habit]:
         if owner_id is not None:
             rows = self.conn.execute(
-                "SELECT * FROM habits WHERE owner_id = ? AND archived = 0 ORDER BY id", (owner_id,)
+                "SELECT * FROM habits WHERE owner_id = ? AND archived = 0 " + HABIT_ORDER, (owner_id,)
             )
         else:
             rows = self.conn.execute(
-                "SELECT * FROM habits WHERE pair_id = ? AND archived = 0 ORDER BY id", (pair_id,)
+                "SELECT * FROM habits WHERE pair_id = ? AND archived = 0 " + HABIT_ORDER, (pair_id,)
             )
         return [self._habit(row) for row in rows]
+
+    def set_pinned(self, habit_id: int, pinned: bool) -> None:
+        self.conn.execute("UPDATE habits SET pinned = ? WHERE id = ?", (int(pinned), habit_id))
+        self.conn.commit()
+
+    def reorder(self, habit_ids: list[int], pinned: set[int] | None = None) -> None:
+        """Store the given order (first = top); optionally replace the pinned set too."""
+        with self.conn:
+            for position, habit_id in enumerate(habit_ids):
+                if pinned is None:
+                    self.conn.execute(
+                        "UPDATE habits SET position = ? WHERE id = ?", (position, habit_id)
+                    )
+                else:
+                    self.conn.execute(
+                        "UPDATE habits SET position = ?, pinned = ? WHERE id = ?",
+                        (position, int(habit_id in pinned), habit_id),
+                    )
 
     def archive_habit(self, habit_id: int) -> None:
         self.conn.execute("UPDATE habits SET archived = 1 WHERE id = ?", (habit_id,))

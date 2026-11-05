@@ -103,6 +103,7 @@ def test_schedule_and_migration(tmp_path):
     storage = Storage(path)
     habit = storage.list_habits(owner_id=1)[0]
     assert habit.schedule == 127 and habit.created is not None
+    assert habit.kind == "do" and habit.pinned is False and habit.position == 0
     new = storage.add_habit("Зал", "🏋️", owner_id=1, schedule=0b0101010, created=DAY)
     assert new.schedule == 0b0101010 and new.created == DAY
     with pytest.raises(ValueError):
@@ -116,3 +117,22 @@ def test_habit_kind(db):
     assert db.add_habit("Читать", owner_id=1).kind == "do"
     with pytest.raises(ValueError):
         db.add_habit("x", owner_id=1, kind="maybe")
+
+
+def test_order_and_pin(db):
+    a = db.add_habit("A", owner_id=1)
+    b = db.add_habit("B", owner_id=1)
+    c = db.add_habit("C", owner_id=1)
+    assert [h.title for h in db.list_habits(owner_id=1)] == ["A", "B", "C"]
+    db.reorder([c.id, a.id, b.id])
+    assert [h.title for h in db.list_habits(owner_id=1)] == ["C", "A", "B"]
+    db.set_pinned(b.id, True)
+    habits = db.list_habits(owner_id=1)
+    assert [h.title for h in habits] == ["B", "C", "A"] and habits[0].pinned
+    db.reorder([a.id, b.id, c.id], pinned={a.id})
+    assert [(h.title, h.pinned) for h in db.list_habits(owner_id=1)] == [
+        ("A", True), ("B", False), ("C", False)
+    ]
+    # New habits go to the end.
+    db.add_habit("D", owner_id=1)
+    assert db.list_habits(owner_id=1)[-1].title == "D"

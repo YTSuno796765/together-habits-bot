@@ -222,3 +222,33 @@ def habit_index_today(state):
     from datetime import date
 
     return date.fromisoformat(state["today"]).weekday()
+
+
+def test_order_and_pin_api():
+    async def body(env):
+        for title in ("A", "B", "C"):
+            await env.call("POST", "/api/habits", json={"scope": "p", "title": title})
+        await env.call("POST", "/api/habits", json={"scope": "p", "title": "Курить", "kind": "avoid"})
+        habits = (await env.call("GET", "/api/state?scope=p"))[1]["habits"]
+        ids = {h["title"]: h["id"] for h in habits}
+
+        order = [ids["C"], ids["A"], ids["B"], ids["Курить"]]
+        status, _ = await env.call("POST", "/api/order", json={"scope": "p", "ids": order, "pinned": [ids["B"]]})
+        assert status == 200
+        habits = (await env.call("GET", "/api/state?scope=p"))[1]["habits"]
+        assert [h["title"] for h in habits] == ["B", "C", "A", "Курить"]
+        assert [h["pinned"] for h in habits] == [True, False, False, False]
+
+        status, _ = await env.call("POST", f"/api/habits/{ids['A']}/pin", json={"pinned": True})
+        assert status == 200
+        assert (await env.call("GET", "/api/state?scope=p"))[1]["habits"][0]["title"] in {"A", "B"}
+
+        # Incomplete, foreign or malformed lists are rejected.
+        assert (await env.call("POST", "/api/order", json={"scope": "p", "ids": order[:2]}))[0] == 409
+        assert (await env.call("POST", "/api/order", json={"scope": "p", "ids": order + [999]}))[0] == 409
+        assert (await env.call("POST", "/api/order", json={"scope": "p", "ids": [[1]]}))[0] == 400
+        assert (await env.call("POST", "/api/order", user=2, json={"scope": "p", "ids": order}))[0] == 409
+        assert (await env.call("POST", f"/api/habits/{ids['A']}/pin", user=2, json={"pinned": True}))[0] == 404
+        assert (await env.call("POST", f"/api/habits/{ids['A']}/pin", json={"pinned": "yes"}))[0] == 400
+
+    run(body)

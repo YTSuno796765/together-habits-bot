@@ -96,6 +96,8 @@ class WebApi:
         app.router.add_post("/api/checkin", self._checkin)
         app.router.add_post("/api/habits", self._add_habit)
         app.router.add_delete("/api/habits/{habit_id:\\d+}", self._delete_habit)
+        app.router.add_post("/api/habits/{habit_id:\\d+}/pin", self._pin_habit)
+        app.router.add_post("/api/order", self._order)
         app.router.add_post("/api/invite", self._invite)
         app.router.add_post("/api/mood", self._mood)
         return app
@@ -201,6 +203,7 @@ class WebApi:
             "schedule": habit.schedule,
             "scheduleLabel": logic.schedule_label(habit.schedule),
             "kind": habit.kind,
+            "pinned": habit.pinned,
             "dueToday": logic.is_scheduled(habit.schedule, today),
             "meMarked": me_marked,
             "partnerMarked": partner_marked,
@@ -388,6 +391,31 @@ class WebApi:
     async def _delete_habit(self, request: web.Request) -> web.Response:
         habit = self._owned_habit(request["user_id"], request.match_info["habit_id"])
         self.db.archive_habit(habit.id)
+        return web.json_response({"ok": True})
+
+    async def _pin_habit(self, request: web.Request) -> web.Response:
+        habit = self._owned_habit(request["user_id"], request.match_info["habit_id"])
+        data = await self._json(request)
+        pinned = data.get("pinned")
+        if not isinstance(pinned, bool):
+            raise ApiError("Некорректный запрос")
+        self.db.set_pinned(habit.id, pinned)
+        return web.json_response({"ok": True})
+
+    async def _order(self, request: web.Request) -> web.Response:
+        """Save a new order (and pinned set) for all habits of one mode."""
+        data = await self._json(request)
+        scope = self._scope(data.get("scope"))
+        _, habits = self._active_view(request["user_id"], scope)
+        ids, pinned = data.get("ids"), data.get("pinned", [])
+        if not isinstance(ids, list) or not isinstance(pinned, list):
+            raise ApiError("Некорректный запрос")
+        if not all(isinstance(i, int) and not isinstance(i, bool) for i in [*ids, *pinned]):
+            raise ApiError("Некорректный запрос")
+        known = {habit.id for habit in habits}
+        if len(ids) != len(set(ids)) or set(ids) != known or not set(pinned) <= known:
+            raise ApiError("Список привычек изменился — обнови страницу", 409)
+        self.db.reorder(ids, set(pinned))
         return web.json_response({"ok": True})
 
     async def _invite(self, request: web.Request) -> web.Response:
