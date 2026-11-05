@@ -84,3 +84,27 @@ def test_habit_validation(db):
         db.add_habit(f"h{i}", owner_id=1)
     with pytest.raises(ValueError):
         db.add_habit("one more", owner_id=1)
+
+
+def test_schedule_and_migration(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.executescript(
+        "CREATE TABLE habits (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, "
+        "emoji TEXT NOT NULL, owner_id INTEGER, pair_id INTEGER, archived INTEGER NOT NULL DEFAULT 0, "
+        "created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);"
+        "INSERT INTO habits (title, emoji, owner_id) VALUES ('Old', '⭐', 1);"
+    )
+    old.commit()
+    old.close()
+
+    storage = Storage(path)
+    habit = storage.list_habits(owner_id=1)[0]
+    assert habit.schedule == 127 and habit.created is not None
+    new = storage.add_habit("Зал", "🏋️", owner_id=1, schedule=0b0101010, created=DAY)
+    assert new.schedule == 0b0101010 and new.created == DAY
+    with pytest.raises(ValueError):
+        storage.add_habit("Никогда", owner_id=1, schedule=0)
+    storage.close()

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 
-from telegram import Update
+from aiohttp import web
+from telegram import MenuButtonWebApp, Update, WebAppInfo
+from telegram.error import TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -14,13 +17,45 @@ from telegram.ext import (
 from together_habits.config import BotConfig
 from together_habits.db import Storage
 from together_habits.handlers import Handlers
+from together_habits.webapp import WebApi
+
+log = logging.getLogger(__name__)
 
 
 def build_application(config: BotConfig) -> Application:
     storage = Storage(config.db_path)
-    handlers = Handlers(storage, config.tz)
+    handlers = Handlers(storage, config.tz, config.webapp_url)
+    api = WebApi(storage, config.tz, config.telegram_bot_token, handlers)
+    runner: dict[str, web.AppRunner] = {}
 
-    app = Application.builder().token(config.telegram_bot_token).build()
+    async def post_init(app: Application) -> None:
+        api.bot = app.bot
+        if not config.webapp_url:
+            return
+        web_runner = web.AppRunner(api.build(), access_log=None)
+        await web_runner.setup()
+        await web.TCPSite(web_runner, config.webapp_host, config.webapp_port).start()
+        runner["web"] = web_runner
+        log.info("Mini App served on %s:%s", config.webapp_host, config.webapp_port)
+        try:
+            await app.bot.set_chat_menu_button(
+                menu_button=MenuButtonWebApp("Привычки", WebAppInfo(url=config.webapp_url))
+            )
+        except TelegramError as exc:
+            log.warning("Could not set the menu button: %s", exc)
+
+    async def post_shutdown(app: Application) -> None:
+        if "web" in runner:
+            await runner["web"].cleanup()
+        storage.close()
+
+    app = (
+        Application.builder()
+        .token(config.telegram_bot_token)
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+        .build()
+    )
     app.add_handler(CommandHandler("start", handlers.start))
     app.add_handler(CommandHandler("help", handlers.help))
     app.add_handler(CommandHandler("today", handlers.today_cmd))

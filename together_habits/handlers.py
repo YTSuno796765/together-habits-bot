@@ -41,9 +41,10 @@ class ScopeView:
 
 
 class Handlers:
-    def __init__(self, storage: Storage, tz: ZoneInfo) -> None:
+    def __init__(self, storage: Storage, tz: ZoneInfo, webapp_url: str | None = None) -> None:
         self.db = storage
         self.tz = tz
+        self.webapp_url = webapp_url
 
     # ---- helpers -----------------------------------------------------------
 
@@ -74,12 +75,33 @@ class Handlers:
             )
 
     async def _notify(self, context: Context, user_id: int | None, text: str, markup: Any = None) -> None:
-        if user_id is None:
+        if user_id is not None:
+            await self.send(context.bot, user_id, text, markup)
+
+    async def notify_checkin(self, bot: Any, habit: Habit, user_id: int, today: date) -> None:
+        """Tell the partner about a fresh check-in on a shared habit."""
+        if habit.pair_id is None:
             return
-        try:
-            await context.bot.send_message(
-                user_id, text, parse_mode=ParseMode.HTML, reply_markup=markup
+        pair = self.db.get_pair_by_id(habit.pair_id)
+        partner_id = pair.other(user_id) if pair else None
+        if partner_id is None:
+            return
+        members = self.db.habit_members(habit)
+        checkins = self.db.checkins(habit.id)
+        title = f"{habit.emoji} <b>{escape(habit.title)}</b>"
+        if members <= checkins.get(today, set()):
+            streak = logic.current_streak(
+                logic.completed_days(checkins, members), today, habit.schedule, habit.created
             )
+            text, markup = f"🔥 Вы оба выполнили {title}! Совместная серия: {streak} дн.", None
+        else:
+            text = f"👀 {self._name(user_id)} выполняет {title}. Твоя очередь!"
+            markup = kb.open_today(self.webapp_url)
+        await self.send(bot, partner_id, text, markup)
+
+    async def send(self, bot: Any, user_id: int, text: str, markup: Any = None) -> None:
+        try:
+            await bot.send_message(user_id, text, parse_mode=ParseMode.HTML, reply_markup=markup)
         except TelegramError as exc:  # partner blocked the bot, etc.
             log.info("Could not notify user: %s", exc)
 
@@ -106,11 +128,11 @@ class Handlers:
         if context.args and context.args[0].startswith("join_"):
             await self._join(update, context, user_id, context.args[0].removeprefix("join_"))
             return
-        await self._show(update, WELCOME.format(name=self._name(user_id)), kb.main_menu())
+        await self._show(update, WELCOME.format(name=self._name(user_id)), kb.main_menu(self.webapp_url))
 
     async def help(self, update: Update, context: Context) -> None:
         self._register(update)
-        await self._show(update, HELP, kb.main_menu())
+        await self._show(update, HELP, kb.main_menu(self.webapp_url))
 
     async def today_cmd(self, update: Update, context: Context) -> None:
         user_id = self._register(update)
@@ -132,9 +154,9 @@ class Handlers:
 
         if action == "menu":
             context.user_data.pop("awaiting", None)
-            await self._show(update, WELCOME.format(name=self._name(user_id)), kb.main_menu())
+            await self._show(update, WELCOME.format(name=self._name(user_id)), kb.main_menu(self.webapp_url))
         elif action == "help":
-            await self._show(update, HELP, kb.main_menu())
+            await self._show(update, HELP, kb.main_menu(self.webapp_url))
         elif action == "today":
             await self._today_overview(update, user_id)
         elif action in {"mode", "list", "add", "stats", "manage", "custom", "invite", "unpair", "unpairok"}:
@@ -200,7 +222,7 @@ class Handlers:
         try:
             self.db.create_invite(user_id, SCOPE_KIND[scope])
         except PairError as exc:
-            await self._show(update, escape(str(exc)), kb.main_menu())
+            await self._show(update, escape(str(exc)), kb.main_menu(self.webapp_url))
             return
         await self._mode(update, context, user_id, scope)
 
@@ -208,7 +230,7 @@ class Handlers:
         try:
             pair = self.db.join_pair(code, user_id)
         except PairError as exc:
-            await self._show(update, "😕 " + escape(str(exc)), kb.main_menu())
+            await self._show(update, "😕 " + escape(str(exc)), kb.main_menu(self.webapp_url))
             return
         scope = KIND_SCOPE[pair.kind]
         owner = pair.owner_id
@@ -286,7 +308,7 @@ class Handlers:
         scope = context.user_data.pop("awaiting", None)
         message = update.effective_message
         if scope is None or message is None:
-            await self._show(update, "Выбери действие в меню 👇", kb.main_menu())
+            await self._show(update, "Выбери действие в меню 👇", kb.main_menu(self.webapp_url))
             return
         emoji, title = _split_emoji(message.text or "")
         await self._create_habit(update, user_id, scope, emoji, title)
@@ -300,12 +322,14 @@ class Handlers:
     async def _create_habit(self, update: Update, user_id: int, scope: str, emoji: str, title: str) -> None:
         view = self._view(user_id, scope)
         if view is None:
-            await self._show(update, "Сначала нужно собрать связку в этом режиме.", kb.main_menu())
+            await self._show(update, "Сначала нужно собрать связку в этом режиме.", kb.main_menu(self.webapp_url))
             return
         owner = user_id if scope == "p" else None
         pair_id = view.pair.id if view.pair else None
         try:
-            habit = self.db.add_habit(title, emoji, owner_id=owner, pair_id=pair_id)
+            habit = self.db.add_habit(
+                title, emoji, owner_id=owner, pair_id=pair_id, created=self.today()
+            )
         except ValueError:
             await self._show(
                 update,
@@ -378,23 +402,14 @@ class Handlers:
         toast = "✅ Отмечено" if checked else "Отметка снята"
 
         if checked and habit.pair_id is not None:
-            pair = self.db.get_pair_by_id(habit.pair_id)
-            partner_id = pair.other(user_id) if pair else None
             members = self.db.habit_members(habit)
             checkins = self.db.checkins(habit_id)
-            title = f"{habit.emoji} <b>{escape(habit.title)}</b>"
             if members <= checkins.get(today, set()):
-                streak = logic.current_streak(logic.completed_days(checkins, members), today)
-                text = f"🔥 Вы оба выполнили {title}! Совместная серия: {streak} дн."
-                await self._notify(context, partner_id, text)
-                toast = f"🔥 Вы оба! Серия {streak} дн."
-            else:
-                await self._notify(
-                    context,
-                    partner_id,
-                    f"👀 {self._name(user_id)} выполняет {title}. Твоя очередь!",
-                    kb.open_today(),
+                streak = logic.current_streak(
+                    logic.completed_days(checkins, members), today, habit.schedule, habit.created
                 )
+                toast = f"🔥 Вы оба! Серия {streak} дн."
+            await self.notify_checkin(context.bot, habit, user_id, today)
         if update.callback_query:
             await update.callback_query.answer(toast)
         await self._list(update, context, user_id, scope)
@@ -431,8 +446,8 @@ class Handlers:
             blocks.append(
                 f"{habit.emoji} <b>{escape(habit.title)}</b>\n"
                 f"{logic.week_marks(days, today)}\n"
-                f"🔥 Серия: {logic.current_streak(days, today)} · "
-                f"🏆 Рекорд: {logic.best_streak(days)}"
+                f"🔥 Серия: {logic.current_streak(days, today, habit.schedule, habit.created)} · "
+                f"🏆 Рекорд: {logic.best_streak(days, habit.schedule, habit.created)}"
             )
         if not view.habits:
             blocks.append("Привычек пока нет.")
@@ -471,7 +486,7 @@ class Handlers:
             await self._show(
                 update,
                 "Трекер настроения работает в режиме 💞 «Для пары». Сначала пригласи партнёра.",
-                kb.main_menu(),
+                kb.main_menu(self.webapp_url),
             )
             return
         await self._show(update, "Как ты сегодня? 💭", kb.mood_menu())
@@ -513,7 +528,10 @@ class Handlers:
             if view is None:
                 continue
             pending += sum(
-                1 for h in view.habits if user_id not in self.db.checkins(h.id).get(today, set())
+                1
+                for h in view.habits
+                if logic.is_scheduled(h.schedule, today)
+                and user_id not in self.db.checkins(h.id).get(today, set())
             )
         return pending
 
@@ -526,7 +544,7 @@ class Handlers:
                     context,
                     user_id,
                     f"⏰ Осталось отметить привычек сегодня: {pending}. Не теряй серию! 🔥",
-                    kb.open_today(),
+                    kb.open_today(self.webapp_url),
                 )
 
 

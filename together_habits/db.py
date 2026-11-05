@@ -9,6 +9,7 @@ from datetime import date
 from pathlib import Path
 
 PAIR_KINDS = ("friend", "couple")
+EVERY_DAY = 0b1111111
 MAX_HABITS_PER_SCOPE = 15
 
 SCHEMA = """
@@ -32,6 +33,7 @@ CREATE TABLE IF NOT EXISTS habits (
     emoji TEXT NOT NULL,
     owner_id INTEGER REFERENCES users(id),
     pair_id INTEGER REFERENCES pairs(id) ON DELETE CASCADE,
+    schedule INTEGER NOT NULL DEFAULT 127,
     archived INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CHECK ((owner_id IS NULL) <> (pair_id IS NULL))
@@ -86,6 +88,8 @@ class Habit:
     emoji: str
     owner_id: int | None
     pair_id: int | None
+    schedule: int = EVERY_DAY  # bit N set = weekday N (Monday = 0)
+    created: date | None = None
 
 
 class Storage:
@@ -96,7 +100,13 @@ class Storage:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.executescript(SCHEMA)
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(habits)")}
+        if "schedule" not in columns:
+            self.conn.execute("ALTER TABLE habits ADD COLUMN schedule INTEGER NOT NULL DEFAULT 127")
 
     def close(self) -> None:
         self.conn.close()
@@ -199,7 +209,16 @@ class Storage:
 
     @staticmethod
     def _habit(row: sqlite3.Row) -> Habit:
-        return Habit(row["id"], row["title"], row["emoji"], row["owner_id"], row["pair_id"])
+        created = date.fromisoformat(row["created_at"][:10]) if row["created_at"] else None
+        return Habit(
+            row["id"],
+            row["title"],
+            row["emoji"],
+            row["owner_id"],
+            row["pair_id"],
+            row["schedule"],
+            created,
+        )
 
     def add_habit(
         self,
@@ -208,17 +227,24 @@ class Storage:
         *,
         owner_id: int | None = None,
         pair_id: int | None = None,
+        schedule: int = EVERY_DAY,
+        created: date | None = None,
     ) -> Habit:
         if (owner_id is None) == (pair_id is None):
             raise ValueError("habit needs exactly one of owner_id or pair_id")
+        if not 1 <= schedule <= EVERY_DAY:
+            raise ValueError("schedule must select at least one weekday")
         title = title.strip()[:40]
+        emoji = emoji.strip()[:8] or "⭐"
         if not title:
             raise ValueError("habit title is empty")
         if len(self.list_habits(owner_id=owner_id, pair_id=pair_id)) >= MAX_HABITS_PER_SCOPE:
             raise ValueError("too many habits")
+        created_at = (created or date.today()).isoformat() + " 00:00:00"
         cur = self.conn.execute(
-            "INSERT INTO habits (title, emoji, owner_id, pair_id) VALUES (?, ?, ?, ?)",
-            (title, emoji, owner_id, pair_id),
+            "INSERT INTO habits (title, emoji, owner_id, pair_id, schedule, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (title, emoji, owner_id, pair_id, schedule, created_at),
         )
         self.conn.commit()
         habit = self.get_habit(cur.lastrowid)

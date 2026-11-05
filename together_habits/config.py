@@ -19,6 +19,9 @@ class BotConfig:
     telegram_bot_token: str
     db_path: Path = DEFAULT_DB_PATH
     timezone: str = DEFAULT_TIMEZONE
+    webapp_url: str | None = None
+    webapp_host: str = "127.0.0.1"
+    webapp_port: int = 8080
 
     @property
     def tz(self) -> ZoneInfo:
@@ -53,4 +56,22 @@ def load_config(env: Mapping[str, str] | None = None) -> BotConfig:
         raise ConfigError(f"Unknown timezone in HABITS_TIMEZONE: {timezone}") from exc
 
     db_path = Path(source.get("HABITS_DB_PATH", str(DEFAULT_DB_PATH)).strip() or DEFAULT_DB_PATH)
-    return BotConfig(telegram_bot_token=token, db_path=db_path, timezone=timezone)
+
+    webapp_url = source.get("WEBAPP_URL", "").strip().rstrip("/") or None
+    if webapp_url is not None and not webapp_url.startswith("https://"):
+        raise ConfigError("WEBAPP_URL must start with https:// (Telegram requires HTTPS)")
+    port_raw = source.get("WEBAPP_PORT", source.get("PORT", "8080")).strip() or "8080"
+    try:
+        webapp_port = int(port_raw)
+    except ValueError as exc:
+        raise ConfigError("WEBAPP_PORT must be an integer") from exc
+    webapp_host = source.get("WEBAPP_HOST", "127.0.0.1").strip() or "127.0.0.1"
+
+    return BotConfig(
+        telegram_bot_token=token,
+        db_path=db_path,
+        timezone=timezone,
+        webapp_url=webapp_url,
+        webapp_host=webapp_host,
+        webapp_port=webapp_port,
+    )

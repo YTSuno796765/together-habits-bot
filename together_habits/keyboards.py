@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from telegram import InlineKeyboardButton as Btn
 from telegram import InlineKeyboardMarkup as Markup
+from telegram import WebAppInfo
 
 from together_habits.logic import MOOD_EMOJI
 from together_habits.texts import TEMPLATES
@@ -11,9 +12,16 @@ from together_habits.texts import TEMPLATES
 BACK_MENU = Btn("⬅️ В меню", callback_data="menu")
 
 
-def main_menu() -> Markup:
+def app_button(webapp_url: str | None) -> list[list[Btn]]:
+    if not webapp_url:
+        return []
+    return [[Btn("📱 Открыть приложение", web_app=WebAppInfo(url=webapp_url))]]
+
+
+def main_menu(webapp_url: str | None = None) -> Markup:
     return Markup(
-        [
+        app_button(webapp_url)
+        + [
             [Btn("🤝 С другом", callback_data="mode:f"), Btn("💞 Для пары", callback_data="mode:c")],
             [Btn("🎯 Личный рост", callback_data="mode:p")],
             [Btn("✅ Отметить сегодня", callback_data="today")],
@@ -109,5 +117,5 @@ def reminder_menu(current: int | None) -> Markup:
     )
 
 
-def open_today() -> Markup:
-    return Markup([[Btn("✅ Отметить", callback_data="today")]])
+def open_today(webapp_url: str | None = None) -> Markup:
+    return Markup(app_button(webapp_url) or [[Btn("✅ Отметить", callback_data="today")]])

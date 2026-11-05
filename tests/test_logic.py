@@ -44,3 +44,40 @@ def test_mood_match_and_compatibility():
     assert logic.average_mood(moods, 1) == 3
     assert logic.compatibility_score(1.0, 0.5) == 75
     assert logic.compatibility_score(None, None) is None
+
+
+TUE_THU_SAT = 0b0101010  # bits for вт, чт, сб
+
+
+def test_schedule_label():
+    assert logic.schedule_label(127) == "каждый день"
+    assert logic.schedule_label(31) == "по будням"
+    assert logic.schedule_label(96) == "по выходным"
+    assert logic.schedule_label(TUE_THU_SAT) == "вт, чт, сб"
+
+
+def test_streak_skips_unscheduled_days():
+    # TODAY (2026-11-05) is a Thursday.
+    tue, thu, sat_before, thu_before = d(2), d(0), d(5), d(7)
+    days = {tue, thu, sat_before, thu_before}
+    assert logic.current_streak(days, TODAY, TUE_THU_SAT) == 4
+    # Today still open does not break the streak.
+    assert logic.current_streak(days - {thu}, TODAY, TUE_THU_SAT) == 3
+    # Missing a scheduled Tuesday breaks it.
+    assert logic.current_streak(days - {tue}, TODAY, TUE_THU_SAT) == 1
+    assert logic.best_streak(days, TUE_THU_SAT) == 4
+
+
+def test_day_status_and_completion():
+    start = d(3)
+    days = {d(1)}
+    assert logic.day_status(d(1), TODAY, days, 127, start) == "done"
+    assert logic.day_status(d(2), TODAY, days, 127, start) == "missed"
+    assert logic.day_status(d(5), TODAY, days, 127, start) == "off"  # before habit existed
+    assert logic.day_status(TODAY, TODAY, days, 127, start) == "today"
+    assert logic.day_status(TODAY, TODAY, days, TUE_THU_SAT - 0b1000, start) == "off"
+    assert logic.day_status(TODAY + timedelta(days=1), TODAY, days, 127, start) == "future"
+    # d(3), d(2), d(1) are due; today is not done yet so it is not counted.
+    assert logic.completion(days, TODAY, 7, 127, start) == (1, 3)
+    assert logic.completion(days | {TODAY}, TODAY, 7, 127, start) == (2, 4)
+    assert logic.week_of(TODAY)[0].weekday() == 0 and len(logic.week_of(TODAY)) == 7
