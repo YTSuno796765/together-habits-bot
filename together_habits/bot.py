@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from functools import partial
+from typing import Any
 
 from aiohttp import web
 from telegram import MenuButtonWebApp, Update, WebAppInfo
@@ -17,15 +18,23 @@ from telegram.ext import (
 from together_habits.config import BotConfig
 from together_habits.db import Storage
 from together_habits.handlers import Handlers
+from together_habits.scheduler import Scheduler
 from together_habits.webapp import WebApi
 
 log = logging.getLogger(__name__)
 
 
+async def export_cmd(update: Update, context: Any, handlers: Handlers, scheduler: Scheduler) -> None:
+    """/export — send the user's data as a CSV file."""
+    user_id = handlers._register(update)
+    await scheduler.send_export(context.bot, user_id, handlers.today(), caption="🗂 Твои данные (CSV)")
+
+
 def build_application(config: BotConfig) -> Application:
     storage = Storage(config.db_path)
     handlers = Handlers(storage, config.tz, config.webapp_url)
-    api = WebApi(storage, config.tz, config.telegram_bot_token, handlers)
+    scheduler = Scheduler(storage, handlers, config.tz, config.admin_id)
+    api = WebApi(storage, config.tz, config.telegram_bot_token, handlers, scheduler=scheduler)
     runner: dict[str, web.AppRunner] = {}
 
     async def post_init(app: Application) -> None:
@@ -60,15 +69,13 @@ def build_application(config: BotConfig) -> Application:
     app.add_handler(CommandHandler("help", handlers.help))
     app.add_handler(CommandHandler("today", handlers.today_cmd))
     app.add_handler(CommandHandler("mood", handlers.mood_cmd))
+    app.add_handler(CommandHandler("export", partial(export_cmd, handlers=handlers, scheduler=scheduler)))
     app.add_handler(CallbackQueryHandler(handlers.on_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.on_text))
 
     if app.job_queue is not None:
-        now = datetime.now(config.tz)
-        next_hour = (now + timedelta(hours=1)).replace(minute=0, second=5, microsecond=0)
-        app.job_queue.run_repeating(
-            handlers.reminder_job, interval=3600, first=(next_hour - now).total_seconds()
-        )
+        # One job a minute sends every timed notification (deduplicated in the database).
+        app.job_queue.run_repeating(scheduler.job, interval=60, first=10)
     return app
 
 

@@ -22,6 +22,7 @@ class BotConfig:
     webapp_url: str | None = None
     webapp_host: str = "127.0.0.1"
     webapp_port: int = 8080
+    admin_id: int | None = None  # optional: gets a weekly database backup
 
     @property
     def tz(self) -> ZoneInfo:
@@ -66,6 +67,10 @@ def load_config(env: Mapping[str, str] | None = None) -> BotConfig:
     except ValueError as exc:
         raise ConfigError("WEBAPP_PORT must be an integer") from exc
     webapp_host = source.get("WEBAPP_HOST", "127.0.0.1").strip() or "127.0.0.1"
+    admin_raw = source.get("HABITS_ADMIN_ID", "").strip()
+    if admin_raw and not admin_raw.lstrip("-").isdigit():
+        raise ConfigError("HABITS_ADMIN_ID must be a numeric Telegram user id")
+    admin_id = int(admin_raw) if admin_raw else None
 
     return BotConfig(
         telegram_bot_token=token,
@@ -74,4 +79,5 @@ def load_config(env: Mapping[str, str] | None = None) -> BotConfig:
         webapp_url=webapp_url,
         webapp_host=webapp_host,
         webapp_port=webapp_port,
+        admin_id=admin_id,
     )

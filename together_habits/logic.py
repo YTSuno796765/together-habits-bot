@@ -341,6 +341,30 @@ def due_today(
     return is_scheduled(schedule, today)
 
 
+# ---- plans -------------------------------------------------------------------------
+
+
+def plan_occurs(first_day: date, repeat: str | None, day: date) -> bool:
+    if repeat == "weekly":
+        return day >= first_day and (day - first_day).days % 7 == 0
+    return day == first_day
+
+
+def plan_occurrences(first_day: date, repeat: str | None, start: date, end: date) -> list[date]:
+    """Dates of a (possibly weekly) plan within [start, end]."""
+    if repeat != "weekly":
+        return [first_day] if start <= first_day <= end else []
+    if first_day > end:
+        return []
+    offset = max(0, (start - first_day).days)
+    cursor = first_day + timedelta(days=-(-offset // 7) * 7)
+    result = []
+    while cursor <= end:
+        result.append(cursor)
+        cursor += timedelta(days=7)
+    return result
+
+
 # ---- challenges -------------------------------------------------------------------
 
 
@@ -367,6 +391,38 @@ def challenge_winners(scores: Mapping[int, int]) -> list[int]:
         return []
     best = max(scores.values())
     return [user for user, score in scores.items() if score == best] if best > 0 else []
+
+
+def completion_between(
+    days: set[date],
+    first: date,
+    last: date,
+    schedule: int = EVERY_DAY,
+    start: date | None = None,
+    weekly_target: int | None = None,
+) -> tuple[int, int]:
+    """(done, due) for a finished period [first, last] (every day in it already passed)."""
+    if start is not None:
+        first = max(first, start)
+    if first > last:
+        return 0, 0
+    if weekly_target:
+        done = due = 0
+        monday = week_start(first)
+        while monday <= last:
+            goal = week_goal(monday, weekly_target, start)
+            done += min(week_count(days, monday), goal)
+            due += goal
+            monday += timedelta(days=7)
+        return done, due
+    done = due = 0
+    cursor = first
+    while cursor <= last:
+        if is_scheduled(schedule, cursor):
+            due += 1
+            done += cursor in days
+        cursor += ONE_DAY
+    return done, due
 
 
 def ratio(done: int, total: int) -> float | None:

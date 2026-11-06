@@ -83,12 +83,14 @@ class WebApi:
         bot_token: str,
         handlers: Handlers,
         bot: Any = None,
+        scheduler: Any = None,
     ) -> None:
         self.db = storage
         self.tz = tz
         self.bot_token = bot_token
         self.handlers = handlers
         self.bot = bot  # set once the Telegram application is initialised
+        self.scheduler = scheduler
 
     def today(self) -> date:
         return datetime.now(self.tz).date()
@@ -115,6 +117,9 @@ class WebApi:
         app.router.add_post("/api/note", self._note)
         app.router.add_post("/api/freeze", self._freeze)
         app.router.add_post("/api/nudge", self._nudge)
+        app.router.add_get("/api/notifications", self._notifications)
+        app.router.add_post("/api/notifications", self._update_notifications)
+        app.router.add_post("/api/export", self._export)
         app.router.add_post("/api/react", self._react)
         app.router.add_get("/api/challenges", self._challenges)
         app.router.add_post("/api/challenges", self._create_challenge)
@@ -724,6 +729,38 @@ class WebApi:
         self.db.reorder(ids, set(pinned))
         return web.json_response({"ok": True})
 
+    # ---- notifications & export ----------------------------------------------------
+
+    async def _notifications(self, request: web.Request) -> web.Response:
+        return web.json_response(self.db.notification_settings(request["user_id"]))
+
+    async def _update_notifications(self, request: web.Request) -> web.Response:
+        user_id = request["user_id"]
+        data = await self._json(request)
+        kwargs: dict[str, Any] = {}
+        for api_key, db_key in (("reminderHour", "reminder_hour"), ("digestHour", "digest_hour")):
+            if api_key in data:
+                kwargs[db_key] = data[api_key]
+        for api_key, db_key in (("weeklyReport", "weekly_report"), ("weeklyExport", "weekly_export")):
+            if api_key in data:
+                if not isinstance(data[api_key], bool):
+                    raise ApiError("Некорректный запрос")
+                kwargs[db_key] = data[api_key]
+        try:
+            self.db.set_notification_settings(user_id, **kwargs)
+        except ValueError as exc:
+            raise ApiError("Час — от 0 до 23") from exc
+        return web.json_response(self.db.notification_settings(user_id))
+
+    async def _export(self, request: web.Request) -> web.Response:
+        """Send the user's data to their chat as a CSV file."""
+        if self.bot is None or self.scheduler is None:
+            raise ApiError("Экспорт временно недоступен", 503)
+        await self.scheduler.send_export(
+            self.bot, request["user_id"], self.today(), caption="🗂 Твои данные (CSV)"
+        )
+        return web.json_response({"ok": True})
+
     # ---- nudges & reactions ----------------------------------------------------
 
     def _shared_habit(self, user_id: int, habit_id: Any) -> tuple[Habit, int]:
@@ -940,7 +977,9 @@ class WebApi:
 
     # ---- plans -----------------------------------------------------------------
 
-    def _plan_payload(self, plan: Plan, user_id: int, pairs: dict[int, Pair]) -> dict[str, Any]:
+    def _plan_payload(
+        self, plan: Plan, user_id: int, pairs: dict[int, Pair], on: date | None = None
+    ) -> dict[str, Any]:
         pair = pairs[plan.pair_id]
         partner_id = pair.other(user_id)
         return {
@@ -948,7 +987,9 @@ class WebApi:
             "scope": KIND_SCOPE[pair.kind],
             "title": plan.title,
             "emoji": plan.emoji,
-            "date": plan.day.isoformat(),
+            "date": (on or plan.day).isoformat(),
+            "firstDate": plan.day.isoformat(),
+            "repeat": plan.repeat,
             "time": plan.time,
             "note": plan.note,
             "status": plan.status,
@@ -972,11 +1013,24 @@ class WebApi:
         by_id = {p.id: p for p in pairs.values() if p is not None}
         # Show a whole 6-week grid around the month, plus everything upcoming.
         grid_start = first - timedelta(days=first.weekday())
-        plans = self.db.plans_for_user(user_id, grid_start, grid_start + timedelta(days=41))
-        upcoming = [
-            p for p in self.db.plans_for_user(user_id, today, today + timedelta(days=365))
-            if p.status != "declined"
-        ][:20]
+        grid_end = grid_start + timedelta(days=41)
+        # Weekly plans expand into one entry per occurrence.
+        grid = sorted(
+            (
+                (occurrence, p)
+                for p in self.db.plans_for_user(user_id, grid_start, grid_end)
+                for occurrence in logic.plan_occurrences(p.day, p.repeat, grid_start, grid_end)
+            ),
+            key=lambda item: (item[0], item[1].time or "99:99", item[1].id),
+        )
+        upcoming_items = []
+        for p in self.db.plans_for_user(user_id, today, today + timedelta(days=365)):
+            if p.status == "declined":
+                continue
+            nxt = logic.plan_occurrences(p.day, p.repeat, today, today + timedelta(days=365))
+            if nxt:
+                upcoming_items.append((nxt[0], p))
+        upcoming_items.sort(key=lambda item: (item[0], item[1].time or "99:99", item[1].id))
         incoming = [
             p for p in self.db.plans_for_user(user_id, today)
             if p.status == "pending" and p.author_id != user_id
@@ -995,8 +1049,8 @@ class WebApi:
                     for s, p in pairs.items()
                 },
                 "sections": self._sections(user_id),
-                "plans": [self._plan_payload(p, user_id, by_id) for p in plans],
-                "upcoming": [self._plan_payload(p, user_id, by_id) for p in upcoming],
+                "plans": [self._plan_payload(p, user_id, by_id, on) for on, p in grid],
+                "upcoming": [self._plan_payload(p, user_id, by_id, on) for on, p in upcoming_items[:20]],
                 "incoming": [self._plan_payload(p, user_id, by_id) for p in incoming],
             }
         )
@@ -1030,6 +1084,7 @@ class WebApi:
                 emoji=str(data.get("emoji", "📅")),
                 time=time_value,
                 note=str(data.get("note", "") or ""),
+                repeat="weekly" if data.get("repeat") == "weekly" else None,
             )
         except ValueError as exc:
             raise ApiError("Напиши, что предлагаешь") from exc

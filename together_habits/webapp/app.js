@@ -510,7 +510,7 @@
   }
 
   function planCard(x, withActions, withDate) {
-    const meta = [withDate ? dayTitle(x.date) : null, x.time, (x.scope === "c" ? "💞 " : "🤝 ") + x.partner].filter(Boolean).join(" · ");
+    const meta = [withDate ? dayTitle(x.date) : null, x.time, x.repeat ? "🔁" : null, (x.scope === "c" ? "💞 " : "🤝 ") + x.partner].filter(Boolean).join(" · ");
     return h("div", { class: "plan " + x.scope + " " + x.status, role: "button", tabindex: "0", onclick: () => openPlanDetail(x) },
       h("div", { class: "plan-icon" }, x.emoji),
       h("div", { class: "plan-body" },
@@ -584,6 +584,7 @@
       const dateInput = h("input", { class: "input", type: "date", min: P.today, value: form.date, onchange: (e) => { form.date = e.target.value; paint(); } });
       const timeInput = h("input", { class: "input", type: "time", onchange: (e) => { form.time = e.target.value; } });
       const note = h("input", { class: "input", maxlength: "200", placeholder: "Комментарий (необязательно)", oninput: (e) => { form.note = e.target.value; } });
+      const repeatSwitch = h("button", { class: "switch", role: "switch", onclick: () => { form.repeat = !form.repeat; repeatSwitch.classList.toggle("on", form.repeat); haptic("select"); } }, h("span"));
       const emojiButtons = PLAN_EMOJIS.map((em) => h("button", { class: "emoji-opt", onclick: () => { form.emoji = em; paint(); haptic("select"); } }, em));
       const whoButtons = scopes.map((s) => h("button", {
         class: "tab",
@@ -603,7 +604,7 @@
       async function send() {
         submit.disabled = true;
         try {
-          await api("/api/plans", { method: "POST", body: { scope: form.scope, title: form.title, emoji: form.emoji, date: form.date, time: form.time || null, note: form.note } });
+          await api("/api/plans", { method: "POST", body: { scope: form.scope, title: form.title, emoji: form.emoji, date: form.date, time: form.time || null, note: form.note, repeat: form.repeat ? "weekly" : null } });
           haptic("success");
           closeSheet();
           state.selectedDay = form.date;
@@ -629,6 +630,7 @@
           h("div", null, h("div", { class: "field-label" }, "Дата"), dateInput),
           h("div", null, h("div", { class: "field-label" }, "Время"), timeInput),
         ),
+        h("div", { class: "set-row" }, h("span", null, "🔁 Повторять каждую неделю"), repeatSwitch),
         h("div", { class: "field-label" }, "Комментарий"),
         note,
         submit,
@@ -1335,12 +1337,62 @@
       }, "Сохранить");
 
       return h("div", null,
-        h("h2", null, "Разделы"),
+        h("h2", null, "Настройки"),
+        notificationsBlock(),
+        h("div", { class: "section-title" }, "Разделы"),
         h("div", { class: "section-hint" }, "Названия и видимость вкладок — только для тебя. У второго участника всё останется как было."),
         blocks,
         save,
       );
     });
+  }
+
+  function notificationsBlock() {
+    const box = h("div", { class: "panel set-block" }, h("div", { class: "set-title" }, "🔔 Уведомления"), h("div", { class: "section-hint", style: "margin-top:8px" }, "Загрузка…"));
+    const hourSelect = (value, from, to, onChange) => {
+      const select = h("select", { class: "input select", onchange: (e) => onChange(e.target.value === "" ? null : Number(e.target.value)) },
+        h("option", { value: "" }, "Выкл"),
+        Array.from({ length: to - from + 1 }, (_, i) => from + i).map((hour) => h("option", { value: String(hour) }, String(hour).padStart(2, "0") + ":00")));
+      select.value = value == null ? "" : String(value);
+      return select;
+    };
+    const save = async (patch) => {
+      try {
+        await api("/api/notifications", { method: "POST", body: patch });
+        haptic("select");
+        toast("Сохранено");
+      } catch (err) {
+        toast(err.message);
+      }
+    };
+    const switchRow = (label, on, key) => {
+      const sw = h("button", { class: "switch" + (on ? " on" : ""), role: "switch", onclick: () => { on = !on; sw.classList.toggle("on", on); save({ [key]: on }); } }, h("span"));
+      return h("div", { class: "set-row" }, h("span", null, label), sw);
+    };
+    api("/api/notifications").then((n) => {
+      box.replaceChildren(
+        h("div", { class: "set-title" }, "🔔 Уведомления"),
+        h("div", { class: "field-label" }, "Вечернее напоминание о неотмеченных"),
+        hourSelect(n.reminderHour, 7, 23, (v) => save({ reminderHour: v })),
+        h("div", { class: "field-label" }, "Утренний план дня"),
+        hourSelect(n.digestHour, 5, 12, (v) => save({ digestHour: v })),
+        switchRow("📊 Итоги недели (вс, 20:00)", n.weeklyReport, "weeklyReport"),
+        switchRow("🗂 Копия данных в чат (вс)", n.weeklyExport, "weeklyExport"),
+        h("button", {
+          class: "btn ghost slim", style: "margin-top:14px",
+          onclick: async () => {
+            try {
+              await api("/api/export", { method: "POST", body: {} });
+              toast("Файл отправлен в чат с ботом 📨");
+            } catch (err) {
+              toast(err.message);
+            }
+          },
+        }, "Выгрузить данные сейчас (CSV)"),
+        h("div", { class: "section-hint", style: "margin-top:10px" }, "Время для отдельной привычки задаётся в её настройках (✏️ Изменить). Про планы бот напомнит за час."),
+      );
+    }).catch((err) => box.replaceChildren(h("div", { class: "section-hint" }, err.message)));
+    return box;
   }
 
   async function unpairSection(id, info) {

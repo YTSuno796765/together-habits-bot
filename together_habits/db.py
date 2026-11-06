@@ -19,7 +19,14 @@ CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
     reminder_hour INTEGER,
+    digest_hour INTEGER,
+    weekly_report INTEGER NOT NULL DEFAULT 1,
+    weekly_export INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS sent_log (
+    key TEXT PRIMARY KEY,
+    sent_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS pairs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -122,6 +129,7 @@ CREATE TABLE IF NOT EXISTS plans (
     time TEXT,
     note TEXT,
     status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'declined')),
+    repeat TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS plans_pair_day ON plans (pair_id, day);
@@ -258,6 +266,7 @@ class Plan:
     time: str | None
     note: str | None
     status: str
+    repeat: str | None = None  # "weekly" or None
 
 
 PLAN_STATUSES = ("pending", "accepted", "declined")
@@ -307,6 +316,17 @@ class Storage:
             self.conn.execute("ALTER TABLE habits ADD COLUMN position INTEGER NOT NULL DEFAULT 0")
         if "pinned" not in columns:
             self.conn.execute("ALTER TABLE habits ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
+        user_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(users)")}
+        for column, ddl in (
+            ("digest_hour", "INTEGER"),
+            ("weekly_report", "INTEGER NOT NULL DEFAULT 1"),
+            ("weekly_export", "INTEGER NOT NULL DEFAULT 0"),
+        ):
+            if column not in user_columns:
+                self.conn.execute(f"ALTER TABLE users ADD COLUMN {column} {ddl}")
+        plan_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(plans)")}
+        if "repeat" not in plan_columns:
+            self.conn.execute("ALTER TABLE plans ADD COLUMN repeat TEXT")
         if "weekly_target" not in columns:
             self.conn.execute("ALTER TABLE habits ADD COLUMN weekly_target INTEGER")
         for column, ddl in (
@@ -351,6 +371,75 @@ class Storage:
     def users_with_reminder(self, hour: int) -> list[int]:
         rows = self.conn.execute("SELECT id FROM users WHERE reminder_hour = ?", (hour,))
         return [row["id"] for row in rows]
+
+    def notification_settings(self, user_id: int) -> dict[str, object]:
+        row = self.conn.execute(
+            "SELECT reminder_hour, digest_hour, weekly_report, weekly_export FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+        if row is None:
+            return {"reminderHour": None, "digestHour": None, "weeklyReport": True, "weeklyExport": False}
+        return {
+            "reminderHour": row["reminder_hour"],
+            "digestHour": row["digest_hour"],
+            "weeklyReport": bool(row["weekly_report"]),
+            "weeklyExport": bool(row["weekly_export"]),
+        }
+
+    def set_notification_settings(
+        self,
+        user_id: int,
+        *,
+        reminder_hour: int | None | object = ...,
+        digest_hour: int | None | object = ...,
+        weekly_report: bool | None = None,
+        weekly_export: bool | None = None,
+    ) -> None:
+        for value in (reminder_hour, digest_hour):
+            if value is not ... and value is not None and (
+                not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 23
+            ):
+                raise ValueError("hour must be between 0 and 23")
+        if reminder_hour is not ...:
+            self.conn.execute("UPDATE users SET reminder_hour = ? WHERE id = ?", (reminder_hour, user_id))
+        if digest_hour is not ...:
+            self.conn.execute("UPDATE users SET digest_hour = ? WHERE id = ?", (digest_hour, user_id))
+        if weekly_report is not None:
+            self.conn.execute("UPDATE users SET weekly_report = ? WHERE id = ?", (int(weekly_report), user_id))
+        if weekly_export is not None:
+            self.conn.execute("UPDATE users SET weekly_export = ? WHERE id = ?", (int(weekly_export), user_id))
+        self.conn.commit()
+
+    def all_user_ids(self) -> list[int]:
+        return [row["id"] for row in self.conn.execute("SELECT id FROM users ORDER BY id")]
+
+    def users_where(self, condition: str, *args: object) -> list[int]:
+        """Small helper for the scheduler (condition is a fixed SQL fragment, args are bound)."""
+        return [row["id"] for row in self.conn.execute(f"SELECT id FROM users WHERE {condition}", args)]
+
+    def mark_sent(self, key: str) -> bool:
+        """Remember a notification; False if it was already sent (dedupe across restarts)."""
+        try:
+            self.conn.execute("INSERT INTO sent_log (key) VALUES (?)", (key,))
+        except sqlite3.IntegrityError:
+            return False
+        self.conn.commit()
+        return True
+
+    def habits_with_reminder_time(self) -> list[Habit]:
+        rows = self.conn.execute("SELECT * FROM habits WHERE remind_at IS NOT NULL AND archived = 0")
+        return [self._habit(row) for row in rows]
+
+    def backup_bytes(self) -> bytes:
+        """A consistent copy of the whole database (for the admin backup)."""
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".db") as tmp:
+            target = sqlite3.connect(tmp.name)
+            with target:
+                self.conn.backup(target)
+            target.close()
+            return Path(tmp.name).read_bytes()
 
     # ---- pairs -------------------------------------------------------------
 
@@ -781,6 +870,7 @@ class Storage:
             row["time"],
             row["note"],
             row["status"],
+            row["repeat"],
         )
 
     def add_plan(
@@ -793,15 +883,18 @@ class Storage:
         emoji: str = "📅",
         time: str | None = None,
         note: str | None = None,
+        repeat: str | None = None,
     ) -> Plan:
+        if repeat not in (None, "weekly"):
+            raise ValueError("repeat must be weekly or None")
         title = title.strip()[:60]
         if not title:
             raise ValueError("plan title is empty")
         note = (note or "").strip()[:200] or None
         cur = self.conn.execute(
-            "INSERT INTO plans (pair_id, author_id, title, emoji, day, time, note) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (pair_id, author_id, title, emoji.strip()[:8] or "📅", day.isoformat(), time, note),
+            "INSERT INTO plans (pair_id, author_id, title, emoji, day, time, note, repeat) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (pair_id, author_id, title, emoji.strip()[:8] or "📅", day.isoformat(), time, note, repeat),
         )
         self.conn.commit()
         plan = self.get_plan(cur.lastrowid)
@@ -822,13 +915,18 @@ class Storage:
         )
         args: list[object] = [user_id, user_id]
         if start is not None:
-            query += " AND plans.day >= ?"
+            # Weekly plans started earlier still have occurrences in the range.
+            query += " AND (plans.day >= ? OR plans.repeat = 'weekly')"
             args.append(start.isoformat())
         if end is not None:
             query += " AND plans.day <= ?"
             args.append(end.isoformat())
         query += " ORDER BY plans.day, COALESCE(plans.time, '99:99'), plans.id"
         return [self._plan(row) for row in self.conn.execute(query, args)]
+
+    def accepted_plans(self) -> list[Plan]:
+        rows = self.conn.execute("SELECT * FROM plans WHERE status = 'accepted'")
+        return [self._plan(row) for row in rows]
 
     def set_plan_status(self, plan_id: int, status: str) -> None:
         if status not in PLAN_STATUSES:

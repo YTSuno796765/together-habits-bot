@@ -595,9 +595,12 @@ class Handlers:
         return "🤝 С другом" if pair and pair.kind == "friend" else "💞 Для пары"
 
     def plan_card(self, plan: Plan) -> str:
+        when = logic.human_date(plan.day, plan.time)
+        if plan.repeat == "weekly":
+            when += f" · каждую неделю ({logic.WEEKDAYS_SHORT[plan.day.weekday()]})"
         lines = [
             f"{plan.emoji} <b>{escape(plan.title)}</b>",
-            f"🗓 {logic.human_date(plan.day, plan.time)}",
+            f"🗓 {when}",
         ]
         if plan.note:
             lines.append(f"💬 {escape(plan.note)}")
@@ -771,18 +774,6 @@ class Handlers:
                 )
             )
         return pending
-
-    async def reminder_job(self, context: Context) -> None:
-        now = datetime.now(self.tz)
-        for user_id in self.db.users_with_reminder(now.hour):
-            pending = self.pending_count(user_id, now.date())
-            if pending:
-                await self._notify(
-                    context,
-                    user_id,
-                    f"⏰ Осталось отметить привычек сегодня: {pending}. Не теряй серию! 🔥",
-                    kb.open_today(self.webapp_url),
-                )
 
 
 def _split_emoji(text: str) -> tuple[str, str]:
