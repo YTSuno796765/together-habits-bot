@@ -246,3 +246,39 @@ def test_join_challenge_by_deep_link(hx):
     assert 2 in hx.db.challenge_members(ch.id)
     bad = hx.start(2, ["ch_nope"])
     assert "не найден" in bad.replies[-1][0]
+
+
+def test_guide_in_bot(hx):
+    import re
+
+    from together_habits.guide import GUIDE_INTRO, GUIDE_TOPICS
+
+    hx.start(1)
+    menu = hx.start(1).replies[-1][1].to_dict()["inline_keyboard"]
+    assert any(b["callback_data"] == "guide" for row in menu for b in row if "callback_data" in b)
+
+    index = hx.press(1, "guide")
+    assert index.edits[-1][0] == GUIDE_INTRO
+    buttons = [b["callback_data"] for row in index.edits[-1][1].to_dict()["inline_keyboard"] for b in row]
+    assert buttons[: len(GUIDE_TOPICS)] == [f"guide:{key}" for key, _, _ in GUIDE_TOPICS]
+
+    for i, (key, _, text) in enumerate(GUIDE_TOPICS):
+        assert len(text) < 4096
+        # Only simple, balanced <b> tags (Telegram HTML).
+        assert set(re.findall(r"</?(\w+)", text)) <= {"b"}
+        assert text.count("<b>") == text.count("</b>")
+        assert "&" not in text.replace("&amp;", "")
+        page = hx.press(1, f"guide:{key}")
+        assert page.edits[-1][0] == text
+        nav = [b["callback_data"] for b in page.edits[-1][1].to_dict()["inline_keyboard"][0]]
+        if i > 0:
+            assert "guide:" + GUIDE_TOPICS[i - 1][0] in nav
+        if i < len(GUIDE_TOPICS) - 1:
+            assert "guide:" + GUIDE_TOPICS[i + 1][0] in nav
+        assert len(nav) == (1 + (i > 0) + (i < len(GUIDE_TOPICS) - 1))
+
+    unknown = hx.press(1, "guide:nope")
+    assert unknown.edits[-1][0] == GUIDE_INTRO
+    reply = FakeMessage("/guide")
+    asyncio.run(hx.h.guide_cmd(FakeUpdate(1, hx.bot, message=reply), hx.ctx(1)))
+    assert reply.replies[-1][0] == GUIDE_INTRO

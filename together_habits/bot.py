@@ -67,6 +67,7 @@ def build_application(config: BotConfig) -> Application:
     )
     app.add_handler(CommandHandler("start", handlers.start))
     app.add_handler(CommandHandler("help", handlers.help))
+    app.add_handler(CommandHandler("guide", handlers.guide_cmd))
     app.add_handler(CommandHandler("today", handlers.today_cmd))
     app.add_handler(CommandHandler("mood", handlers.mood_cmd))
     app.add_handler(CommandHandler("export", partial(export_cmd, handlers=handlers, scheduler=scheduler)))

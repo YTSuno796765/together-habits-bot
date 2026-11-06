@@ -17,6 +17,7 @@ from telegram.ext import ContextTypes
 
 from together_habits import keyboards as kb
 from together_habits import logic
+from together_habits.guide import GUIDE_BY_KEY, GUIDE_INTRO
 from together_habits.db import Habit, Pair, PairError, Plan, Storage
 from together_habits.texts import (
     HELP,
@@ -184,6 +185,16 @@ class Handlers:
         self._register(update)
         await self._show(update, HELP, self._menu(update))
 
+    async def guide_cmd(self, update: Update, context: Context) -> None:
+        self._register(update)
+        await self._guide(update, "")
+
+    async def _guide(self, update: Update, key: str) -> None:
+        if key in GUIDE_BY_KEY:
+            await self._show(update, GUIDE_BY_KEY[key][1], kb.guide_topic(key))
+        else:
+            await self._show(update, GUIDE_INTRO, kb.guide_menu())
+
     async def today_cmd(self, update: Update, context: Context) -> None:
         user_id = self._register(update)
         await self._today_overview(update, user_id)
@@ -207,6 +218,8 @@ class Handlers:
             await self._show(update, WELCOME.format(name=self._name(user_id)), self._menu(update))
         elif action == "help":
             await self._show(update, HELP, self._menu(update))
+        elif action == "guide":
+            await self._guide(update, arg)
         elif action == "today":
             await self._today_overview(update, user_id)
         elif action in {"mode", "list", "add", "stats", "manage", "custom", "invite", "unpair", "unpairok"}:

@@ -31,9 +31,32 @@ def main_menu(
         + [
             [Btn(titles["p"], callback_data="mode:p")],
             [Btn("✅ Отметить сегодня", callback_data="today")],
+            [Btn("📖 Инструкция", callback_data="guide")],
             [Btn("⏰ Напоминания", callback_data="rem"), Btn("❓ Помощь", callback_data="help")],
         ]
     )
+
+
+def guide_menu() -> Markup:
+    from together_habits.guide import GUIDE_TOPICS
+
+    rows = [[Btn(label, callback_data=f"guide:{key}")] for key, label, _ in GUIDE_TOPICS]
+    rows.append([BACK_MENU])
+    return Markup(rows)
+
+
+def guide_topic(key: str) -> Markup:
+    from together_habits.guide import GUIDE_TOPICS
+
+    keys = [k for k, _, _ in GUIDE_TOPICS]
+    index = keys.index(key)
+    nav = []
+    if index > 0:
+        nav.append(Btn("◀️", callback_data=f"guide:{keys[index - 1]}"))
+    nav.append(Btn("📖 К темам", callback_data="guide"))
+    if index < len(keys) - 1:
+        nav.append(Btn("▶️", callback_data=f"guide:{keys[index + 1]}"))
+    return Markup([nav, [BACK_MENU]])
 
 
 def back_to_mode(scope: str) -> Btn:
