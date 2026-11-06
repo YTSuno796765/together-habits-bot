@@ -505,9 +505,10 @@
     const avoid = d.habits.filter((x) => x.kind === "avoid");
     const pinned = doHabits.filter((x) => x.pinned);
     const rest = doHabits.filter((x) => !x.pinned);
+    const weekMet = (x) => x.weeklyTarget && x.weekDone >= x.weeklyTarget;
     const todo = rest.filter((x) => x.dueToday && !x.meDone);
-    const done = rest.filter((x) => x.dueToday && x.meDone);
-    const off = rest.filter((x) => !x.dueToday);
+    const done = rest.filter((x) => (x.dueToday && x.meDone) || (weekMet(x) && !x.dueToday));
+    const off = rest.filter((x) => !x.dueToday && !weekMet(x));
     const grid = (items) => h("div", { class: "grid" }, items.map(habitCard));
     const out = [];
     if (!doHabits.length) {
@@ -565,7 +566,7 @@
 
     const meta = (x.pinned ? "📌 " : "") + (isAvoid
       ? (x.meMarked ? "срыв сегодня" : x.partnerMarked ? "срыв у " + state.data.pair.partner : "держусь")
-      : x.scheduleLabel);
+      : x.scheduleLabel + (x.weeklyTarget ? " · " + x.weekDone + "/" + x.weeklyTarget : ""));
 
     return h("div", { class: classes.join(" "), role: "button", tabindex: "0", onclick: () => openHabitSheet(x) },
       h("div", { class: "habit-top" }, h("div", { class: "habit-icon" }, x.emoji), action),
@@ -576,7 +577,8 @@
         h("div", { class: "habit-foot" },
           personDots(x, isAvoid ? "bad" : "good"),
           h("span", { class: "streak" + (isAvoid ? " clean" : ""), "aria-label": (isAvoid ? "Без срывов " : "Серия ") + x.streak },
-            isAvoid ? icon("shield") : icon("flame"), String(x.streak), isAvoid ? h("small", null, " дн.") : null),
+            isAvoid ? icon("shield") : icon("flame"), String(x.streak),
+            isAvoid || x.weeklyTarget ? h("small", null, " " + x.streakUnit) : null),
         ),
       ),
     );
@@ -647,7 +649,7 @@
         h("div", { class: "body" },
           h("div", { class: "name" }, (x.kind === "avoid" ? "🚫 " : "") + x.title),
           h("div", { class: "mini" }, h("span", { style: "width:" + Math.round((x.rate30 || 0) * 100) + "%" })),
-          h("div", { class: "sub" }, (x.kind === "avoid" ? "без срыва " : "серия ") + x.streak + " · рекорд " + x.best),
+          h("div", { class: "sub" }, (x.kind === "avoid" ? "без срыва " : "серия ") + x.streak + " " + x.streakUnit + " · рекорд " + x.best),
         ),
         h("div", { class: "pct" }, pct(x.rate30)),
       ))),
@@ -825,7 +827,7 @@
 
   function openAddSheet(kind) {
     haptic("light");
-    const form = { kind: kind === "avoid" ? "avoid" : "do", title: "", emoji: kind === "avoid" ? "🚫" : "⭐", schedule: 127 };
+    const form = { kind: kind === "avoid" ? "avoid" : "do", title: "", emoji: kind === "avoid" ? "🚫" : "⭐", schedule: 127, weekly: 0 };
     openSheet(() => {
       const submit = h("button", { class: "btn", disabled: true, onclick: () => save() }, "Добавить");
       const input = h("input", {
@@ -841,6 +843,23 @@
         onclick: () => { form.schedule ^= 1 << i; paintDays(); haptic("select"); },
       }, label));
       const preset = (label, mask) => h("button", { class: "chip", onclick: () => { form.schedule = mask; paintDays(); } }, label);
+      const daysBox = h("div", null,
+        h("div", { class: "days" }, dayButtons),
+        h("div", { class: "presets" }, preset("Каждый день", 127), preset("Будни", 31), preset("Выходные", 96)),
+      );
+      const weeklyButtons = [1, 2, 3, 4, 5, 6].map((n) => h("button", {
+        class: "day",
+        onclick: () => { form.weekly = n; paintDays(); haptic("select"); },
+      }, n + "×"));
+      const weeklyBox = h("div", null,
+        h("div", { class: "days six" }, weeklyButtons),
+        h("div", { class: "section-hint", style: "margin:10px 4px 0" }, "Отмечай в любые дни — главное набрать нужное число раз за неделю (пн–вс)."),
+      );
+      const modeButtons = [["days", "По дням"], ["weekly", "Раз в неделю"]].map(([mode, label]) => h("button", {
+        class: "tab",
+        onclick: () => { form.weekly = mode === "weekly" ? (form.weekly || 3) : 0; paintDays(); haptic("select"); },
+      }, label));
+      const modeTabs = h("div", { class: "tabs kind-tabs" }, modeButtons);
       const templatesBox = h("div", null);
       const kindButtons = [["do", "Делать"], ["avoid", "Не делать"]].map(([value, label]) => h("button", {
         class: "tab",
@@ -861,8 +880,16 @@
         emojiButtons.forEach((b) => b.classList.toggle("on", b.textContent === form.emoji));
       }
       function paintDays() {
+        if (form.kind === "avoid") form.weekly = 0;
+        const weekly = form.weekly > 0;
+        modeTabs.style.display = form.kind === "avoid" ? "none" : "";
+        modeButtons[0].classList.toggle("active", !weekly);
+        modeButtons[1].classList.toggle("active", weekly);
+        daysBox.style.display = weekly ? "none" : "";
+        weeklyBox.style.display = weekly ? "" : "none";
+        weeklyButtons.forEach((b, i) => b.classList.toggle("on", form.weekly === i + 1));
         dayButtons.forEach((b, i) => b.classList.toggle("on", Boolean(form.schedule & (1 << i))));
-        submit.disabled = !form.title.trim() || !form.schedule;
+        submit.disabled = !form.title.trim() || (!weekly && !form.schedule);
       }
       function paintKind() {
         const isAvoid = form.kind === "avoid";
@@ -893,7 +920,7 @@
       async function save() {
         submit.disabled = true;
         try {
-          await api("/api/habits", { method: "POST", body: { scope: state.scope, kind: form.kind, title: form.title, emoji: form.emoji, schedule: form.schedule } });
+          await api("/api/habits", { method: "POST", body: { scope: state.scope, kind: form.kind, title: form.title, emoji: form.emoji, schedule: form.weekly ? 127 : form.schedule, weeklyTarget: form.weekly || null } });
           haptic("success");
           closeSheet();
           await refresh();
@@ -914,9 +941,10 @@
         input,
         h("div", { class: "field-label" }, "Иконка"),
         h("div", { class: "emojis" }, emojiButtons),
-        h("div", { class: "field-label" }, "Дни"),
-        h("div", { class: "days" }, dayButtons),
-        h("div", { class: "presets" }, preset("Каждый день", 127), preset("Будни", 31), preset("Выходные", 96)),
+        h("div", { class: "field-label" }, "Как часто"),
+        modeTabs,
+        daysBox,
+        weeklyBox,
         submit,
       );
     });
@@ -1138,8 +1166,8 @@
         h("div", null, h("h2", null, x.title), h("div", { class: "habit-meta" }, x.kind === "avoid" ? "не делать · " + x.scheduleLabel : x.scheduleLabel)),
       ),
       h("div", { class: "tiles two" },
-        tile(String(x.streak), x.kind === "avoid" ? "дней без срыва" : "текущая серия"),
-        tile(String(x.best), x.kind === "avoid" ? "рекорд без срыва" : "рекорд")),
+        tile(String(x.streak), x.kind === "avoid" ? "дней без срыва" : x.weeklyTarget ? "недель подряд" : "текущая серия"),
+        tile(String(x.best), x.kind === "avoid" ? "рекорд без срыва" : x.weeklyTarget ? "рекорд, недель" : "рекорд")),
       h("div", { class: "week", style: "margin:18px 0 6px" }, x.week.map((w) => h("span", { class: "seg " + w.status }))),
       h("div", { class: "labels" }, WEEKDAYS.map((w) => h("span", null, w))),
       h("button", {

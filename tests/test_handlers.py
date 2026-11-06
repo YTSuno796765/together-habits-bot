@@ -216,3 +216,21 @@ def test_bot_menu_uses_custom_names(hx):
     pair_up(hx, "f")
     habit_list = hx.press(1, "list:f")
     assert habit_list.edits[-1][0].startswith("🤝 Миша &amp; Ко")
+
+
+def test_weekly_habit_reminders_and_stats(hx):
+    from datetime import datetime, timedelta
+
+    hx.start(1)
+    today = datetime.now(ZoneInfo("UTC")).date()
+    monday = today - timedelta(days=today.weekday())
+    habit = hx.db.add_habit("Зал", "🏋️", owner_id=1, weekly_target=1, created=monday - timedelta(days=7))
+    assert hx.h.pending_count(1, today) == 1
+    hx.db.toggle_checkin(habit.id, 1, today)
+    assert hx.h.pending_count(1, today) == 0  # done today
+    if today != monday:
+        hx.db.toggle_checkin(habit.id, 1, today)
+        hx.db.toggle_checkin(habit.id, 1, monday)
+        assert hx.h.pending_count(1, today) == 0  # weekly target already met
+    stats = hx.press(1, "stats:p")
+    assert "нед." in stats.edits[-1][0] and "1 раз в неделю" in stats.edits[-1][0]

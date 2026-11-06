@@ -292,6 +292,7 @@ h1 { font-size: 40px; line-height: 1.05; font-weight: 800; letter-spacing: -0.03
 .days { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
 .day { height: 44px; border-radius: 12px; background: var(--surface); font-weight: 700; font-size: 14px; color: var(--muted); }
 .day.on { background: var(--mint); color: var(--mint-ink); }
+.days.six { grid-template-columns: repeat(6, 1fr); }
 .presets { display: flex; gap: 8px; margin-top: 10px; }
 .presets .chip { height: 34px; font-size: 14px; }
 .sheet .btn { margin-top: 22px; }

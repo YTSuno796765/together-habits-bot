@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS habits (
     kind TEXT NOT NULL DEFAULT 'do',
     position INTEGER NOT NULL DEFAULT 0,
     pinned INTEGER NOT NULL DEFAULT 0,
+    weekly_target INTEGER,
     archived INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CHECK ((owner_id IS NULL) <> (pair_id IS NULL))
@@ -118,6 +119,7 @@ class Habit:
     kind: str = "do"  # "do": check in when done; "avoid": check in only on a slip
     pinned: bool = False
     position: int = 0
+    weekly_target: int | None = None  # "N times a week" instead of fixed weekdays
 
     @property
     def is_avoid(self) -> bool:
@@ -161,6 +163,8 @@ class Storage:
             self.conn.execute("ALTER TABLE habits ADD COLUMN position INTEGER NOT NULL DEFAULT 0")
         if "pinned" not in columns:
             self.conn.execute("ALTER TABLE habits ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
+        if "weekly_target" not in columns:
+            self.conn.execute("ALTER TABLE habits ADD COLUMN weekly_target INTEGER")
 
     def close(self) -> None:
         self.conn.close()
@@ -275,6 +279,7 @@ class Storage:
             row["kind"],
             bool(row["pinned"]),
             row["position"],
+            row["weekly_target"],
         )
 
     def add_habit(
@@ -287,9 +292,14 @@ class Storage:
         schedule: int = EVERY_DAY,
         created: date | None = None,
         kind: str = "do",
+        weekly_target: int | None = None,
     ) -> Habit:
         if kind not in HABIT_KINDS:
             raise ValueError(f"unknown habit kind: {kind}")
+        if weekly_target is not None:
+            if kind != "do" or not 1 <= weekly_target <= 6:
+                raise ValueError("weekly target must be 1..6 for a to-do habit")
+            schedule = EVERY_DAY  # any day may count
         if (owner_id is None) == (pair_id is None):
             raise ValueError("habit needs exactly one of owner_id or pair_id")
         if not 1 <= schedule <= EVERY_DAY:
@@ -307,9 +317,10 @@ class Storage:
             (owner_id if owner_id is not None else pair_id,),
         ).fetchone()
         cur = self.conn.execute(
-            "INSERT INTO habits (title, emoji, owner_id, pair_id, schedule, created_at, kind, position) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (title, emoji, owner_id, pair_id, schedule, created_at, kind, row["next"]),
+            "INSERT INTO habits "
+            "(title, emoji, owner_id, pair_id, schedule, created_at, kind, position, weekly_target) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (title, emoji, owner_id, pair_id, schedule, created_at, kind, row["next"], weekly_target),
         )
         self.conn.commit()
         habit = self.get_habit(cur.lastrowid)

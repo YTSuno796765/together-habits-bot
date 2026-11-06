@@ -96,3 +96,38 @@ def test_avoid_habit_days_and_streak():
     slipped_today = logic.habit_done_days("avoid", {TODAY: {1}}, {1}, TODAY, start)
     assert logic.habit_streak("avoid", slipped_today, TODAY, 127, start) == 0
     assert logic.habit_streak("do", slipped_today, TODAY, 127, start) == 5
+
+
+def test_weekly_target_logic():
+    # TODAY (2026-11-05) is a Thursday; its week starts on Monday 2026-11-02.
+    monday = logic.week_start(TODAY)
+    assert monday == d(3) and logic.weekly_label(3) == "3 раза в неделю"
+    assert logic.weekly_label(1) == "1 раз в неделю" and logic.weekly_label(5) == "5 раз в неделю"
+    start = monday - timedelta(days=14)  # habit started two weeks before this one
+    prev2 = {start, start + timedelta(days=2), start + timedelta(days=4)}  # 3 in week -2
+    prev1 = {monday - timedelta(days=6), monday - timedelta(days=1)}  # only 2 in week -1
+    this = {d(2), d(1)}  # 2 so far this week
+    days = prev2 | prev1 | this
+    # Week -1 missed the target, so the streak is 0 until this week is met.
+    assert logic.weekly_streak(days, TODAY, 3, start) == 0
+    assert logic.weekly_streak(days | {TODAY}, TODAY, 3, start) == 1
+    assert logic.weekly_streak(days, TODAY, 2, start) == 3
+    assert logic.best_weekly_streak(days, 2, start) == 3
+    # Due today while the target is not met yet (counting days before today).
+    assert logic.weekly_due_today(days, TODAY, 3) is True
+    assert logic.weekly_due_today(days, TODAY, 2) is False
+    assert logic.due_today(127, TODAY, days | {TODAY}, 2) is True  # done today stays visible
+    # Days without a check-in are never "missed".
+    assert logic.day_status(d(3), TODAY, days, 127, start, 3) == "off"
+    assert logic.day_status(TODAY, TODAY, days, 127, start, 3) == "today"
+    assert logic.day_status(TODAY, TODAY, days, 127, start, 2) == "off"
+    # Completion: finished weeks in full (extra check-ins capped), this week as done so far.
+    assert logic.weekly_completion(days, TODAY, 21, 3, start) == (3 + 2 + 2, 3 + 3 + 2)
+
+
+def test_weekly_first_week_is_prorated():
+    # Habit created on Saturday: only 2 days left that week, so a target of 3 becomes 2.
+    sat = logic.week_start(TODAY) - timedelta(days=2)
+    days = {sat, sat + timedelta(days=1)}
+    assert logic.week_goal(logic.week_start(sat), 3, sat) == 2
+    assert logic.weekly_streak(days, TODAY, 3, sat) == 1

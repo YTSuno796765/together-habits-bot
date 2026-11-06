@@ -363,3 +363,28 @@ def test_sections_and_unpair():
         assert (await env.call("POST", "/api/unpair", json={"scope": "f"}))[0] == 404
 
     run(body)
+
+
+def test_weekly_target_habit():
+    async def body(env):
+        assert (await env.call("POST", "/api/habits", json={"scope": "p", "title": "x", "weeklyTarget": 7}))[0] == 400
+        assert (await env.call("POST", "/api/habits", json={"scope": "p", "title": "x", "weeklyTarget": "3"}))[0] == 400
+        assert (await env.call(
+            "POST", "/api/habits", json={"scope": "p", "title": "x", "kind": "avoid", "weeklyTarget": 3}
+        ))[0] == 400
+        status, _ = await env.call(
+            "POST", "/api/habits", json={"scope": "p", "title": "Зал", "emoji": "🏋️", "weeklyTarget": 3}
+        )
+        assert status == 200
+        habit = (await env.call("GET", "/api/state?scope=p"))[1]["habits"][0]
+        assert habit["weeklyTarget"] == 3 and habit["scheduleLabel"] == "3 раза в неделю"
+        assert habit["weekDone"] == 0 and habit["dueToday"] is True and habit["streakUnit"] == "нед."
+        assert all(w["status"] in {"off", "today", "future"} for w in habit["week"])
+
+        await env.call("POST", "/api/checkin", json={"habitId": habit["id"]})
+        state = (await env.call("GET", "/api/state?scope=p"))[1]
+        assert state["habits"][0]["weekDone"] == 1 and state["progress"] == {"done": 1, "total": 1}
+        stats = (await env.call("GET", "/api/stats?scope=p"))[1]
+        assert stats["habits"][0]["streakUnit"] == "нед." and stats["rate7"] == 1.0
+
+    run(body)

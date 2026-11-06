@@ -95,10 +95,12 @@ class Handlers:
             await self.send(bot, partner_id, text)
             return
         if members <= checkins.get(today, set()):
-            streak = logic.current_streak(
-                logic.completed_days(checkins, members), today, habit.schedule, habit.created
+            streak = logic.habit_streak(
+                habit.kind, logic.completed_days(checkins, members), today,
+                habit.schedule, habit.created, habit.weekly_target,
             )
-            text, markup = f"🔥 Вы оба выполнили {title}! Совместная серия: {streak} дн.", None
+            unit = logic.streak_unit(habit.weekly_target)
+            text, markup = f"🔥 Вы оба выполнили {title}! Совместная серия: {streak} {unit}", None
         else:
             text = f"👀 {self._name(user_id)} выполняет {title}. Твоя очередь!"
             markup = kb.open_today(self.webapp_url)
@@ -109,6 +111,10 @@ class Handlers:
             await bot.send_message(user_id, text, parse_mode=ParseMode.HTML, reply_markup=markup)
         except TelegramError as exc:  # partner blocked the bot, etc.
             log.info("Could not notify user: %s", exc)
+
+    def _my_days(self, habit: Habit, user_id: int) -> set[date]:
+        """Days on which this user checked in (enough for "is it due today")."""
+        return {day for day, users in self.db.checkins(habit.id).items() if user_id in users}
 
     def scope_title(self, user_id: int, scope: str) -> str:
         """Section title with the user's custom name, e.g. '🤝 Миша'."""
@@ -446,10 +452,11 @@ class Handlers:
             members = self.db.habit_members(habit)
             checkins = self.db.checkins(habit_id)
             if members <= checkins.get(today, set()):
-                streak = logic.current_streak(
-                    logic.completed_days(checkins, members), today, habit.schedule, habit.created
+                streak = logic.habit_streak(
+                    habit.kind, logic.completed_days(checkins, members), today,
+                    habit.schedule, habit.created, habit.weekly_target,
                 )
-                toast = f"🔥 Вы оба! Серия {streak} дн."
+                toast = f"🔥 Вы оба! Серия {streak} {logic.streak_unit(habit.weekly_target)}"
             await self.notify_checkin(context.bot, habit, user_id, today)
         if update.callback_query:
             await update.callback_query.answer(toast)
@@ -464,7 +471,10 @@ class Handlers:
             if view is None:
                 continue
             todo = [
-                h for h in view.habits if not h.is_avoid and logic.is_scheduled(h.schedule, today)
+                h
+                for h in view.habits
+                if not h.is_avoid
+                and logic.due_today(h.schedule, today, self._my_days(h, user_id), h.weekly_target)
             ]
             done = sum(1 for h in todo if user_id in self.db.checkins(h.id).get(today, set()))
             title = self.scope_title(user_id, scope)
@@ -493,8 +503,12 @@ class Handlers:
                 f"{'🚫 ' if habit.is_avoid else ''}{habit.emoji} <b>{escape(habit.title)}</b>\n"
                 f"{logic.week_marks(days, today)}\n"
                 f"{'🛡 Без срыва' if habit.is_avoid else '🔥 Серия'}: "
-                f"{logic.habit_streak(habit.kind, days, today, habit.schedule, habit.created)} · "
-                f"🏆 Рекорд: {logic.best_streak(days, habit.schedule, habit.created)}"
+                f"{logic.habit_streak(habit.kind, days, today, habit.schedule, habit.created, habit.weekly_target)}"
+                f" {logic.streak_unit(habit.weekly_target)} · "
+                f"🏆 Рекорд: {logic.best_streak(days, habit.schedule, habit.created, habit.weekly_target)}"
+                + (f"\n🎯 {logic.weekly_label(habit.weekly_target)}: "
+                   f"{logic.week_count(days, logic.week_start(today))}/{habit.weekly_target} на этой неделе"
+                   if habit.weekly_target else "")
             )
         if not view.habits:
             blocks.append("Привычек пока нет.")
@@ -653,8 +667,10 @@ class Handlers:
                 1
                 for h in view.habits
                 if not h.is_avoid
-                and logic.is_scheduled(h.schedule, today)
                 and user_id not in self.db.checkins(h.id).get(today, set())
+                and logic.due_today(
+                    h.schedule, today, self._my_days(h, user_id), h.weekly_target
+                )
             )
         return pending
 

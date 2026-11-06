@@ -151,3 +151,12 @@ def test_mode_settings(db):
         db.set_mode_settings(1, "p", hidden=True)
     db.set_mode_settings(1, "c", name="x" * 50)
     assert len(db.mode_settings(1)["c"][0]) == 20
+
+
+def test_weekly_target_storage(db):
+    habit = db.add_habit("Зал", owner_id=1, schedule=0b0000001, weekly_target=3)
+    assert habit.weekly_target == 3 and habit.schedule == 127  # any day counts
+    with pytest.raises(ValueError):
+        db.add_habit("x", owner_id=1, weekly_target=7)
+    with pytest.raises(ValueError):
+        db.add_habit("x", owner_id=1, kind="avoid", weekly_target=2)

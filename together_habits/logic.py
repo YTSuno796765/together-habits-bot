@@ -96,15 +96,32 @@ def current_streak(
 
 
 def habit_streak(
-    kind: str, days: set[date], today: date, schedule: int = EVERY_DAY, start: date | None = None
+    kind: str,
+    days: set[date],
+    today: date,
+    schedule: int = EVERY_DAY,
+    start: date | None = None,
+    weekly_target: int | None = None,
 ) -> int:
-    """Current streak; for "don't do" habits a slip today resets it to zero right away."""
+    """Current streak (days, or weeks for "N times a week" habits).
+
+    For "don't do" habits a slip today resets it to zero right away.
+    """
+    if weekly_target:
+        return weekly_streak(days, today, weekly_target, start)
     if kind == "avoid" and today not in days and (start is None or start <= today):
         return 0
     return current_streak(days, today, schedule, start)
 
 
-def best_streak(days: set[date], schedule: int = EVERY_DAY, start: date | None = None) -> int:
+def best_streak(
+    days: set[date],
+    schedule: int = EVERY_DAY,
+    start: date | None = None,
+    weekly_target: int | None = None,
+) -> int:
+    if weekly_target:
+        return best_weekly_streak(days, weekly_target, start)
     if not days:
         return 0
     cursor = min([*days, start] if start else days)
@@ -119,11 +136,23 @@ def best_streak(days: set[date], schedule: int = EVERY_DAY, start: date | None =
 
 
 def day_status(
-    day: date, today: date, days: set[date], schedule: int = EVERY_DAY, start: date | None = None
+    day: date,
+    today: date,
+    days: set[date],
+    schedule: int = EVERY_DAY,
+    start: date | None = None,
+    weekly_target: int | None = None,
 ) -> str:
     """One of: done, today, missed, off (not scheduled / before start), future."""
     if day in days:
         return "done"
+    if weekly_target:
+        # Any day may count; a day without a check-in is never "missed".
+        if day > today:
+            return "future"
+        if day == today and weekly_due_today(days, today, weekly_target):
+            return "today"
+        return "off"
     if day > today:
         return "future" if is_scheduled(schedule, day) else "off"
     if not is_scheduled(schedule, day) or (start is not None and day < start):
@@ -161,17 +190,121 @@ def completion(
     schedule: int = EVERY_DAY,
     start: date | None = None,
     kind: str = "do",
+    weekly_target: int | None = None,
 ) -> tuple[int, int]:
     """(done, due) scheduled days in the last `window` days.
 
     A to-do habit's today counts once done; a "don't do" habit's today always counts
-    (it is a success until a slip is marked).
+    (it is a success until a slip is marked). "N times a week" habits are counted
+    in check-ins against their weekly target.
     """
+    if weekly_target:
+        return weekly_completion(days, today, window, weekly_target, start)
     due = due_days(today, window, schedule, start, days)
     if kind == "avoid" and is_scheduled(schedule, today) and (start is None or start <= today):
         if today not in due:
             due.append(today)
     return sum(1 for day in due if day in days), len(due)
+
+
+# ---- "N times a week" habits ----------------------------------------------------
+
+
+def week_start(day: date) -> date:
+    return day - timedelta(days=day.weekday())
+
+
+def weekly_label(target: int) -> str:
+    return f"{target} {'раз' if target in (1, 5, 6) or target > 4 else 'раза'} в неделю"
+
+
+def week_count(days: set[date], monday: date, until: date | None = None) -> int:
+    """Check-ins in the week starting `monday` (optionally only up to `until`, exclusive)."""
+    end = monday + timedelta(days=7)
+    if until is not None:
+        end = min(end, until)
+    return sum(1 for day in days if monday <= day < end)
+
+
+def week_goal(monday: date, target: int, start: date | None) -> int:
+    """The target for a week; the habit's first week may be shorter than the target."""
+    if start is not None and monday < start <= monday + timedelta(days=6):
+        return min(target, (monday + timedelta(days=7) - start).days)
+    return target
+
+
+def weekly_due_today(days: set[date], today: date, target: int) -> bool:
+    """Still needed this week, counting check-ins before today."""
+    monday = week_start(today)
+    return week_count(days, monday, until=today) < target
+
+
+def weekly_streak(days: set[date], today: date, target: int, start: date | None = None) -> int:
+    """Weeks in a row with the target met; the current week only adds once it is met."""
+    monday = week_start(today)
+    first = week_start(start) if start else (week_start(min(days)) if days else monday)
+    streak = 0
+    if week_count(days, monday) >= week_goal(monday, target, start):
+        streak = 1
+    monday -= timedelta(days=7)
+    while monday >= first:
+        if week_count(days, monday) < week_goal(monday, target, start):
+            break
+        streak += 1
+        monday -= timedelta(days=7)
+    return streak
+
+
+def best_weekly_streak(days: set[date], target: int, start: date | None = None) -> int:
+    if not days:
+        return 0
+    monday = week_start(min([*days, start]) if start else min(days))
+    last = week_start(max(days))
+    best = run = 0
+    while monday <= last:
+        run = run + 1 if week_count(days, monday) >= week_goal(monday, target, start) else 0
+        best = max(best, run)
+        monday += timedelta(days=7)
+    return best
+
+
+def weekly_completion(
+    days: set[date], today: date, window: int, target: int, start: date | None = None
+) -> tuple[int, int]:
+    """(done, due) check-ins for weeks touching the window; extra check-ins don't count.
+
+    Finished weeks are due in full; the current week only counts what is already done.
+    """
+    first = today - timedelta(days=window - 1)
+    if start is not None:
+        first = max(first, start)
+    done = due = 0
+    monday = week_start(first)
+    current = week_start(today)
+    while monday <= current:
+        goal = week_goal(monday, target, start)
+        got = min(week_count(days, monday), goal)
+        done += got
+        due += got if monday == current else goal
+        monday += timedelta(days=7)
+    return done, due
+
+
+def habit_label(schedule: int, weekly_target: int | None = None) -> str:
+    return weekly_label(weekly_target) if weekly_target else schedule_label(schedule)
+
+
+def streak_unit(weekly_target: int | None = None) -> str:
+    return "нед." if weekly_target else "дн."
+
+
+def due_today(
+    schedule: int, today: date, days: set[date], weekly_target: int | None = None
+) -> bool:
+    """Should a to-do habit be done today? (weekly: target not met before today)."""
+    if weekly_target:
+        return weekly_due_today(days, today, weekly_target) or today in days
+    return is_scheduled(schedule, today)
 
 
 def ratio(done: int, total: int) -> float | None:

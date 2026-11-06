@@ -185,12 +185,15 @@ class WebApi:
         done_days = logic.habit_done_days(habit.kind, checkins, members, today, habit.created)
         partner_id = pair.other(user_id) if pair else None
         today_users = checkins.get(today, set())
+        my_days = {day for day, users in checkins.items() if user_id in users}
         me_marked = user_id in today_users
         partner_marked = (partner_id in today_users) if partner_id else None
 
         week = []
         for day in logic.week_of(today):
-            status = logic.day_status(day, today, done_days, habit.schedule, habit.created)
+            status = logic.day_status(
+                day, today, done_days, habit.schedule, habit.created, habit.weekly_target
+            )
             if habit.is_avoid and status == "today":
                 status = "missed"  # slipped today
             if not habit.is_avoid and pair and status in {"missed", "today"} and checkins.get(day):
@@ -208,17 +211,22 @@ class WebApi:
             "title": habit.title,
             "emoji": habit.emoji,
             "schedule": habit.schedule,
-            "scheduleLabel": logic.schedule_label(habit.schedule),
+            "scheduleLabel": logic.habit_label(habit.schedule, habit.weekly_target),
+            "weeklyTarget": habit.weekly_target,
+            "weekDone": logic.week_count(my_days, logic.week_start(today)) if habit.weekly_target else None,
+            "streakUnit": logic.streak_unit(habit.weekly_target),
             "kind": habit.kind,
             "pinned": habit.pinned,
-            "dueToday": logic.is_scheduled(habit.schedule, today),
+            "dueToday": logic.due_today(habit.schedule, today, my_days, habit.weekly_target),
             "meMarked": me_marked,
             "partnerMarked": partner_marked,
             "meDone": me_done,
             "partnerDone": partner_done,
             "week": week,
-            "streak": logic.habit_streak(habit.kind, done_days, today, habit.schedule, habit.created),
-            "best": logic.best_streak(done_days, habit.schedule, habit.created),
+            "streak": logic.habit_streak(
+                habit.kind, done_days, today, habit.schedule, habit.created, habit.weekly_target
+            ),
+            "best": logic.best_streak(done_days, habit.schedule, habit.created, habit.weekly_target),
         }
 
     # ---- endpoints -------------------------------------------------------------
@@ -284,14 +292,21 @@ class WebApi:
         def rate(window: int) -> float | None:
             done = due = 0
             for habit, days in series:
-                d, t = logic.completion(days, today, window, habit.schedule, habit.created, habit.kind)
+                d, t = logic.completion(
+                    days, today, window, habit.schedule, habit.created, habit.kind, habit.weekly_target
+                )
                 done, due = done + d, due + t
             return logic.ratio(done, due)
 
         def day_value(day: date) -> tuple[int, int]:
             done = due = 0
             for habit, days in series:
-                if logic.is_scheduled(habit.schedule, day) and (habit.created is None or habit.created <= day):
+                if habit.weekly_target:
+                    # Flexible habits only show up on the days they were done.
+                    if day in days:
+                        due += 1
+                        done += 1
+                elif logic.is_scheduled(habit.schedule, day) and (habit.created is None or habit.created <= day):
                     due += 1
                     done += day in days
             return done, due
@@ -312,7 +327,10 @@ class WebApi:
         payload: dict[str, Any] = {
             "rate7": rate(7),
             "rate30": rate(30),
-            "best": max((logic.best_streak(days, h.schedule, h.created) for h, days in series), default=0),
+            "best": max(
+                (logic.best_streak(days, h.schedule, h.created, h.weekly_target) for h, days in series),
+                default=0,
+            ),
             "daily": daily,
             "weekday": [
                 {"label": logic.WEEKDAYS_SHORT[i], "done": d, "due": t}
@@ -324,10 +342,13 @@ class WebApi:
                     "title": h.title,
                     "kind": h.kind,
                     "rate30": logic.ratio(
-                        *logic.completion(days, today, 30, h.schedule, h.created, h.kind)
+                        *logic.completion(days, today, 30, h.schedule, h.created, h.kind, h.weekly_target)
                     ),
-                    "streak": logic.habit_streak(h.kind, days, today, h.schedule, h.created),
-                    "best": logic.best_streak(days, h.schedule, h.created),
+                    "streak": logic.habit_streak(
+                        h.kind, days, today, h.schedule, h.created, h.weekly_target
+                    ),
+                    "best": logic.best_streak(days, h.schedule, h.created, h.weekly_target),
+                    "streakUnit": logic.streak_unit(h.weekly_target),
                 }
                 for h, days in series
             ],
@@ -382,6 +403,12 @@ class WebApi:
             raise ApiError("Неизвестный тип привычки")
         if not isinstance(schedule, int):
             raise ApiError("Некорректное расписание")
+        weekly_target = data.get("weeklyTarget")
+        if weekly_target is not None and (
+            not isinstance(weekly_target, int) or isinstance(weekly_target, bool)
+            or not 1 <= weekly_target <= 6 or kind != "do"
+        ):
+            raise ApiError("Раз в неделю — от 1 до 6, только для привычек «Делать»")
         try:
             habit = self.db.add_habit(
                 str(data.get("title", "")),
@@ -391,6 +418,7 @@ class WebApi:
                 schedule=schedule,
                 created=self.today(),
                 kind=kind,
+                weekly_target=weekly_target,
             )
         except ValueError as exc:
             raise ApiError("Проверь название и дни недели (максимум 15 привычек)") from exc
