@@ -116,6 +116,10 @@ class Handlers:
         """Days on which this user checked in (enough for "is it due today")."""
         return {day for day, users in self.db.checkins(habit.id).items() if user_id in users}
 
+    def app_markup(self) -> Any:
+        """'Open app' button (or the text-menu fallback) for notifications."""
+        return kb.open_today(self.webapp_url)
+
     def scope_title(self, user_id: int, scope: str) -> str:
         """Section title with the user's custom name, e.g. '🤝 Миша'."""
         name, _ = self.db.mode_settings(user_id)[scope]
@@ -168,6 +172,9 @@ class Handlers:
     async def start(self, update: Update, context: Context) -> None:
         user_id = self._register(update)
         context.user_data.pop("awaiting", None)
+        if context.args and context.args[0].startswith("ch_"):
+            await self._join_challenge(update, context, user_id, context.args[0].removeprefix("ch_"))
+            return
         if context.args and context.args[0].startswith("join_"):
             await self._join(update, context, user_id, context.args[0].removeprefix("join_"))
             return
@@ -653,6 +660,86 @@ class Handlers:
         await self._show(
             update,
             f"📅 Предложение от <b>{self._name(plan.author_id)}</b>:\n\n{self.plan_card(plan)}\n\n{result}",
+            self._menu(update),
+        )
+
+    # ---- challenges ------------------------------------------------------------
+
+    def challenge_lines(self, challenge: Any, today: date) -> list[str]:
+        members = self.db.challenge_members(challenge.id)
+        scores = logic.challenge_scores(
+            challenge.kind, challenge.start, challenge.end, today,
+            self.db.challenge_marks(challenge.id), members,
+        )
+        unit = "дн. без срыва" if challenge.kind == "avoid" else "дн."
+        medals = ["🥇", "🥈", "🥉"]
+        ranked = sorted(members, key=lambda u: -scores[u])
+        return [
+            f"{medals[i] if i < 3 else '▫️'} {self._name(u)} — {scores[u]} {unit}"
+            for i, u in enumerate(ranked)
+        ]
+
+    async def join_challenge_by_code(self, bot: Any, code: str, user_id: int) -> Any:
+        """Join via invite link; tells the creator. Raises PairError with a user-facing message."""
+        challenge = self.db.challenge_by_code(code)
+        if challenge is None:
+            raise PairError("Челлендж не найден или удалён.")
+        if challenge.end < self.today():
+            raise PairError("Этот челлендж уже закончился.")
+        try:
+            added = self.db.join_challenge(challenge.id, user_id)
+        except ValueError as exc:
+            raise PairError("В челлендже уже 10 участников." if "full" in str(exc) else "Челлендж уже закончился.") from exc
+        if added and challenge.creator_id != user_id:
+            await self.send(
+                bot,
+                challenge.creator_id,
+                f"🏆 {self._name(user_id)} принимает вызов: {challenge.emoji} <b>{escape(challenge.title)}</b>",
+            )
+        return challenge
+
+    async def finalize_challenges(self, bot: Any, today: date) -> int:
+        """Announce results of challenges that ended before today. Returns how many."""
+        count = 0
+        for challenge in self.db.unfinished_challenges_ended_before(today):
+            members = self.db.challenge_members(challenge.id)
+            scores = logic.challenge_scores(
+                challenge.kind, challenge.start, challenge.end, challenge.end,
+                self.db.challenge_marks(challenge.id), members,
+            )
+            winners = logic.challenge_winners(scores)
+            if not winners:
+                verdict = "Победителей нет — в следующий раз получится 💪"
+            elif len(winners) == 1:
+                verdict = f"🏆 Победитель: <b>{self._name(winners[0])}</b>!"
+            else:
+                verdict = "🤝 Ничья: " + ", ".join(f"<b>{self._name(u)}</b>" for u in winners)
+            text = (
+                f"🏁 Челлендж завершён: {challenge.emoji} <b>{escape(challenge.title)}</b>\n\n"
+                + "\n".join(self.challenge_lines(challenge, challenge.end))
+                + f"\n\n{verdict}"
+            )
+            if challenge.stake and winners and len(winners) < len(members):
+                text += f"\n💸 Ставка: {escape(challenge.stake)}"
+            self.db.set_challenge_finished(challenge.id)
+            for user in members:
+                await self.send(bot, user, text, kb.open_today(self.webapp_url))
+            count += 1
+        return count
+
+    async def _join_challenge(self, update: Update, context: Context, user_id: int, code: str) -> None:
+        try:
+            challenge = await self.join_challenge_by_code(context.bot, code, user_id)
+        except PairError as exc:
+            await self._show(update, "😕 " + escape(str(exc)), self._menu(update))
+            return
+        lines = self.challenge_lines(challenge, self.today())
+        stake = f"\n💸 Ставка: {escape(challenge.stake)}" if challenge.stake else ""
+        await self._show(
+            update,
+            f"🏆 Ты в челлендже {challenge.emoji} <b>{escape(challenge.title)}</b>\n"
+            f"до {logic.human_date(challenge.end)}{stake}\n\n" + "\n".join(lines)
+            + "\n\nОтмечайся в приложении: Планы → Челленджи.",
             self._menu(update),
         )
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import secrets
 import sqlite3
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 PAIR_KINDS = ("friend", "couple")
@@ -74,6 +74,43 @@ CREATE TABLE IF NOT EXISTS freezes (
     user_id INTEGER NOT NULL REFERENCES users(id),
     day TEXT NOT NULL,
     PRIMARY KEY (habit_id, day)
+);
+CREATE TABLE IF NOT EXISTS challenges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    creator_id INTEGER NOT NULL REFERENCES users(id),
+    title TEXT NOT NULL,
+    emoji TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('do', 'avoid')),
+    start TEXT NOT NULL,
+    days INTEGER NOT NULL,
+    stake TEXT,
+    invite_code TEXT NOT NULL UNIQUE,
+    finished INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS challenge_members (
+    challenge_id INTEGER NOT NULL REFERENCES challenges(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    PRIMARY KEY (challenge_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS challenge_marks (
+    challenge_id INTEGER NOT NULL REFERENCES challenges(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    day TEXT NOT NULL,
+    PRIMARY KEY (challenge_id, user_id, day)
+);
+CREATE TABLE IF NOT EXISTS nudges (
+    habit_id INTEGER NOT NULL REFERENCES habits(id) ON DELETE CASCADE,
+    sender_id INTEGER NOT NULL REFERENCES users(id),
+    day TEXT NOT NULL,
+    PRIMARY KEY (habit_id, sender_id, day)
+);
+CREATE TABLE IF NOT EXISTS reactions (
+    habit_id INTEGER NOT NULL REFERENCES habits(id) ON DELETE CASCADE,
+    from_id INTEGER NOT NULL REFERENCES users(id),
+    day TEXT NOT NULL,
+    emoji TEXT NOT NULL,
+    PRIMARY KEY (habit_id, from_id, day)
 );
 CREATE TABLE IF NOT EXISTS plans (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -224,6 +261,29 @@ class Plan:
 
 
 PLAN_STATUSES = ("pending", "accepted", "declined")
+
+
+@dataclass(frozen=True)
+class Challenge:
+    id: int
+    creator_id: int
+    title: str
+    emoji: str
+    kind: str
+    start: date
+    days: int
+    stake: str | None
+    invite_code: str
+    finished: bool
+
+    @property
+    def end(self) -> date:
+        return self.start + timedelta(days=self.days - 1)
+
+
+CHALLENGE_LENGTHS = (7, 14, 21, 30)
+MAX_CHALLENGE_MEMBERS = 10
+REACTIONS = ("🔥", "👏", "💪", "❤️", "😎")
 
 
 class Storage:
@@ -811,3 +871,166 @@ class Storage:
             (user_id, scope, current_name, int(current_hidden)),
         )
         self.conn.commit()
+
+    # ---- challenges (with a friend, a partner or a whole group) ---------------
+
+    @staticmethod
+    def _challenge(row: sqlite3.Row) -> Challenge:
+        return Challenge(
+            row["id"], row["creator_id"], row["title"], row["emoji"], row["kind"],
+            date.fromisoformat(row["start"]), row["days"], row["stake"], row["invite_code"],
+            bool(row["finished"]),
+        )
+
+    def create_challenge(
+        self,
+        creator_id: int,
+        title: str,
+        *,
+        emoji: str = "🏆",
+        kind: str = "do",
+        days: int = 7,
+        start: date,
+        stake: str | None = None,
+    ) -> Challenge:
+        title = title.strip()[:40]
+        if not title:
+            raise ValueError("challenge title is empty")
+        if kind not in HABIT_KINDS or days not in CHALLENGE_LENGTHS:
+            raise ValueError("bad challenge kind or length")
+        stake = (stake or "").strip()[:80] or None
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO challenges (creator_id, title, emoji, kind, start, days, stake, invite_code) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (creator_id, title, emoji.strip()[:8] or "🏆", kind, start.isoformat(), days, stake,
+                 secrets.token_urlsafe(8)),
+            )
+            self.conn.execute(
+                "INSERT INTO challenge_members (challenge_id, user_id) VALUES (?, ?)", (cur.lastrowid, creator_id)
+            )
+        challenge = self.get_challenge(cur.lastrowid)
+        assert challenge is not None
+        return challenge
+
+    def get_challenge(self, challenge_id: int) -> Challenge | None:
+        row = self.conn.execute("SELECT * FROM challenges WHERE id = ?", (challenge_id,)).fetchone()
+        return self._challenge(row) if row else None
+
+    def challenge_by_code(self, code: str) -> Challenge | None:
+        row = self.conn.execute("SELECT * FROM challenges WHERE invite_code = ?", (code,)).fetchone()
+        return self._challenge(row) if row else None
+
+    def challenge_members(self, challenge_id: int) -> list[int]:
+        rows = self.conn.execute(
+            "SELECT user_id FROM challenge_members WHERE challenge_id = ? ORDER BY rowid", (challenge_id,)
+        )
+        return [r["user_id"] for r in rows]
+
+    def join_challenge(self, challenge_id: int, user_id: int) -> bool:
+        """Add a member; False if already in. Raises ValueError when full or finished."""
+        challenge = self.get_challenge(challenge_id)
+        if challenge is None or challenge.finished:
+            raise ValueError("challenge is over")
+        members = self.challenge_members(challenge_id)
+        if user_id in members:
+            return False
+        if len(members) >= MAX_CHALLENGE_MEMBERS:
+            raise ValueError("challenge is full")
+        self.conn.execute(
+            "INSERT INTO challenge_members (challenge_id, user_id) VALUES (?, ?)", (challenge_id, user_id)
+        )
+        self.conn.commit()
+        return True
+
+    def leave_challenge(self, challenge_id: int, user_id: int) -> None:
+        with self.conn:
+            self.conn.execute(
+                "DELETE FROM challenge_members WHERE challenge_id = ? AND user_id = ?", (challenge_id, user_id)
+            )
+            self.conn.execute(
+                "DELETE FROM challenge_marks WHERE challenge_id = ? AND user_id = ?", (challenge_id, user_id)
+            )
+
+    def delete_challenge(self, challenge_id: int) -> None:
+        self.conn.execute("DELETE FROM challenges WHERE id = ?", (challenge_id,))
+        self.conn.commit()
+
+    def user_challenges(self, user_id: int) -> list[Challenge]:
+        rows = self.conn.execute(
+            "SELECT challenges.* FROM challenges JOIN challenge_members m ON m.challenge_id = challenges.id "
+            "WHERE m.user_id = ? ORDER BY challenges.finished, challenges.start DESC, challenges.id DESC",
+            (user_id,),
+        )
+        return [self._challenge(r) for r in rows]
+
+    def toggle_challenge_mark(self, challenge_id: int, user_id: int, day: date) -> bool:
+        key = (challenge_id, user_id, day.isoformat())
+        deleted = self.conn.execute(
+            "DELETE FROM challenge_marks WHERE challenge_id = ? AND user_id = ? AND day = ?", key
+        ).rowcount
+        if not deleted:
+            self.conn.execute("INSERT INTO challenge_marks (challenge_id, user_id, day) VALUES (?, ?, ?)", key)
+        self.conn.commit()
+        return not deleted
+
+    def challenge_marks(self, challenge_id: int) -> dict[int, set[date]]:
+        result: dict[int, set[date]] = {}
+        rows = self.conn.execute(
+            "SELECT user_id, day FROM challenge_marks WHERE challenge_id = ?", (challenge_id,)
+        )
+        for r in rows:
+            result.setdefault(r["user_id"], set()).add(date.fromisoformat(r["day"]))
+        return result
+
+    def set_challenge_finished(self, challenge_id: int) -> None:
+        self.conn.execute("UPDATE challenges SET finished = 1 WHERE id = ?", (challenge_id,))
+        self.conn.commit()
+
+    def unfinished_challenges_ended_before(self, day: date) -> list[Challenge]:
+        rows = self.conn.execute("SELECT * FROM challenges WHERE finished = 0")
+        return [c for c in (self._challenge(r) for r in rows) if c.end < day]
+
+    # ---- nudges & reactions -----------------------------------------------------
+
+    def add_nudge(self, habit_id: int, sender_id: int, day: date) -> bool:
+        """Record a nudge; False if this sender already nudged for this habit today."""
+        try:
+            self.conn.execute(
+                "INSERT INTO nudges (habit_id, sender_id, day) VALUES (?, ?, ?)",
+                (habit_id, sender_id, day.isoformat()),
+            )
+        except sqlite3.IntegrityError:
+            return False
+        self.conn.commit()
+        return True
+
+    def nudged(self, habit_id: int, sender_id: int, day: date) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM nudges WHERE habit_id = ? AND sender_id = ? AND day = ?",
+            (habit_id, sender_id, day.isoformat()),
+        ).fetchone()
+        return row is not None
+
+    def set_reaction(self, habit_id: int, from_id: int, day: date, emoji: str | None) -> None:
+        if emoji is None:
+            self.conn.execute(
+                "DELETE FROM reactions WHERE habit_id = ? AND from_id = ? AND day = ?",
+                (habit_id, from_id, day.isoformat()),
+            )
+        else:
+            if emoji not in REACTIONS:
+                raise ValueError("unknown reaction")
+            self.conn.execute(
+                "INSERT INTO reactions (habit_id, from_id, day, emoji) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(habit_id, from_id, day) DO UPDATE SET emoji = excluded.emoji",
+                (habit_id, from_id, day.isoformat(), emoji),
+            )
+        self.conn.commit()
+
+    def reactions(self, habit_id: int, day: date) -> dict[int, str]:
+        """from_user -> emoji for one day."""
+        rows = self.conn.execute(
+            "SELECT from_id, emoji FROM reactions WHERE habit_id = ? AND day = ?", (habit_id, day.isoformat())
+        )
+        return {r["from_id"]: r["emoji"] for r in rows}

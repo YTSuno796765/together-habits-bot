@@ -114,6 +114,13 @@ class WebApi:
         app.router.add_post("/api/amount", self._amount)
         app.router.add_post("/api/note", self._note)
         app.router.add_post("/api/freeze", self._freeze)
+        app.router.add_post("/api/nudge", self._nudge)
+        app.router.add_post("/api/react", self._react)
+        app.router.add_get("/api/challenges", self._challenges)
+        app.router.add_post("/api/challenges", self._create_challenge)
+        app.router.add_post("/api/challenges/join", self._join_challenge)
+        app.router.add_post("/api/challenges/{challenge_id:\\d+}/mark", self._mark_challenge)
+        app.router.add_delete("/api/challenges/{challenge_id:\\d+}", self._leave_challenge)
         app.router.add_post("/api/order", self._order)
         app.router.add_get("/api/plans", self._plans)
         app.router.add_post("/api/plans", self._add_plan)
@@ -280,6 +287,17 @@ class WebApi:
             "myAmount": amounts_today.get(user_id, 0) if habit.is_amount else None,
             "partnerAmount": amounts_today.get(partner_id, 0) if habit.is_amount and partner_id else None,
             "remindAt": habit.remind_at,
+            **self._social(habit, user_id, partner_id, today),
+        }
+
+    def _social(self, habit: Habit, user_id: int, partner_id: int | None, today: date) -> dict[str, Any]:
+        if partner_id is None:
+            return {}
+        reactions = self.db.reactions(habit.id, today)
+        return {
+            "reactionToMe": reactions.get(partner_id),
+            "myReaction": reactions.get(user_id),
+            "nudgedToday": self.db.nudged(habit.id, user_id, today),
         }
 
     # ---- endpoints -------------------------------------------------------------
@@ -704,6 +722,178 @@ class WebApi:
         if len(ids) != len(set(ids)) or set(ids) != known or not set(pinned) <= known:
             raise ApiError("Список привычек изменился — обнови страницу", 409)
         self.db.reorder(ids, set(pinned))
+        return web.json_response({"ok": True})
+
+    # ---- nudges & reactions ----------------------------------------------------
+
+    def _shared_habit(self, user_id: int, habit_id: Any) -> tuple[Habit, int]:
+        habit = self._owned_habit(user_id, habit_id)
+        pair = self.db.get_pair_by_id(habit.pair_id) if habit.pair_id else None
+        partner_id = pair.other(user_id) if pair else None
+        if partner_id is None:
+            raise ApiError("Это не общая привычка")
+        return habit, partner_id
+
+    async def _nudge(self, request: web.Request) -> web.Response:
+        user_id = request["user_id"]
+        data = await self._json(request)
+        habit, partner_id = self._shared_habit(user_id, data.get("habitId"))
+        today = self.today()
+        if partner_id in self.db.checkins(habit.id).get(today, set()):
+            raise ApiError("Уже выполнено — лучше поставь реакцию 🔥")
+        if not self.db.add_nudge(habit.id, user_id, today):
+            raise ApiError("Сегодня уже напоминал — пусть отдохнёт 🙂")
+        if self.bot is not None:
+            name = escape(self.db.user_name(user_id))
+            await self.handlers.send(
+                self.bot,
+                partner_id,
+                f"👊 {name} напоминает: {habit.emoji} <b>{escape(habit.title)}</b> ещё не отмечено сегодня. Давай!",
+                self.handlers.app_markup(),
+            )
+        return web.json_response({"ok": True})
+
+    async def _react(self, request: web.Request) -> web.Response:
+        user_id = request["user_id"]
+        data = await self._json(request)
+        habit, partner_id = self._shared_habit(user_id, data.get("habitId"))
+        emoji = data.get("emoji")
+        today = self.today()
+        if emoji is not None and partner_id not in self.db.checkins(habit.id).get(today, set()):
+            raise ApiError("Реакцию можно поставить, когда второй уже выполнил")
+        try:
+            self.db.set_reaction(habit.id, user_id, today, emoji)
+        except ValueError as exc:
+            raise ApiError("Неизвестная реакция") from exc
+        if emoji and self.bot is not None:
+            name = escape(self.db.user_name(user_id))
+            await self.handlers.send(
+                self.bot, partner_id, f"{emoji} {name} реагирует на {habit.emoji} <b>{escape(habit.title)}</b>"
+            )
+        return web.json_response({"ok": True})
+
+    # ---- challenges -------------------------------------------------------------
+
+    def _challenge_payload(self, challenge: Any, user_id: int, today: date) -> dict[str, Any]:
+        members = self.db.challenge_members(challenge.id)
+        marks = self.db.challenge_marks(challenge.id)
+        scores = logic.challenge_scores(challenge.kind, challenge.start, challenge.end, today, marks, members)
+        username = getattr(self.bot, "username", None)
+        ranked = sorted(members, key=lambda u: -scores[u])
+        return {
+            "id": challenge.id,
+            "title": challenge.title,
+            "emoji": challenge.emoji,
+            "kind": challenge.kind,
+            "start": challenge.start.isoformat(),
+            "end": challenge.end.isoformat(),
+            "days": challenge.days,
+            "dayNumber": max(0, min(challenge.days, (today - challenge.start).days + 1)),
+            "stake": challenge.stake,
+            "finished": challenge.finished or challenge.end < today,
+            "isCreator": challenge.creator_id == user_id,
+            "markedToday": today in marks.get(user_id, set()),
+            "link": f"https://t.me/{username}?start=ch_{challenge.invite_code}" if username else None,
+            "members": [
+                {
+                    "name": self.db.user_name(u),
+                    "me": u == user_id,
+                    "score": scores[u],
+                    "markedToday": today in marks.get(u, set()),
+                }
+                for u in ranked
+            ],
+            "winners": [self.db.user_name(u) for u in logic.challenge_winners(scores)]
+            if challenge.end < today
+            else [],
+        }
+
+    def _member_challenge(self, user_id: int, challenge_id: Any) -> Any:
+        challenge = self.db.get_challenge(int(challenge_id)) if str(challenge_id).isdigit() else None
+        if challenge is None or user_id not in self.db.challenge_members(challenge.id):
+            raise ApiError("Челлендж не найден", 404)
+        return challenge
+
+    async def _challenges(self, request: web.Request) -> web.Response:
+        user_id = request["user_id"]
+        today = self.today()
+        items = [self._challenge_payload(c, user_id, today) for c in self.db.user_challenges(user_id)]
+        active = [c for c in items if not c["finished"]]
+        finished = [c for c in items if c["finished"]][:10]
+        return web.json_response({"today": today.isoformat(), "active": active, "finished": finished})
+
+    async def _create_challenge(self, request: web.Request) -> web.Response:
+        user_id = request["user_id"]
+        data = await self._json(request)
+        invite = data.get("invite", [])
+        if not isinstance(invite, list) or not set(invite) <= {"f", "c"}:
+            raise ApiError("Некорректный запрос")
+        days = data.get("days", 7)
+        try:
+            challenge = self.db.create_challenge(
+                user_id,
+                str(data.get("title", "")),
+                emoji=str(data.get("emoji", "🏆")),
+                kind=str(data.get("kind", "do")),
+                days=days if isinstance(days, int) and not isinstance(days, bool) else 0,
+                start=self.today(),
+                stake=str(data.get("stake") or ""),
+            )
+        except ValueError as exc:
+            raise ApiError("Укажи название и длительность (7, 14, 21 или 30 дней)") from exc
+        name = escape(self.db.user_name(user_id))
+        for scope in invite:
+            pair = self._pair_for(user_id, scope)
+            partner = pair.other(user_id) if pair is not None and pair.is_complete else None
+            if partner is None:
+                continue
+            self.db.join_challenge(challenge.id, partner)
+            if self.bot is not None:
+                stake = f"\n💸 Ставка: {escape(challenge.stake)}" if challenge.stake else ""
+                await self.handlers.send(
+                    self.bot,
+                    partner,
+                    f"🏆 {name} вызывает тебя на челлендж: {challenge.emoji} <b>{escape(challenge.title)}</b>\n"
+                    f"{challenge.days} дней, до {logic.human_date(challenge.end)}{stake}",
+                    self.handlers.app_markup(),
+                )
+        return web.json_response(self._challenge_payload(challenge, user_id, self.today()))
+
+    async def _join_challenge(self, request: web.Request) -> web.Response:
+        data = await self._json(request)
+        try:
+            challenge = await self.handlers.join_challenge_by_code(
+                self.bot, str(data.get("code", "")), request["user_id"]
+            )
+        except PairError as exc:
+            raise ApiError(str(exc)) from exc
+        return web.json_response({"id": challenge.id})
+
+    async def _mark_challenge(self, request: web.Request) -> web.Response:
+        user_id = request["user_id"]
+        challenge = self._member_challenge(user_id, request.match_info["challenge_id"])
+        data = await self._json(request)
+        day = self._day_param(data.get("date"))
+        if not challenge.start <= day <= challenge.end:
+            raise ApiError("Этот день вне челленджа")
+        marked = self.db.toggle_challenge_mark(challenge.id, user_id, day)
+        if marked and challenge.kind == "avoid" and self.bot is not None:
+            name = escape(self.db.user_name(user_id))
+            for member in self.db.challenge_members(challenge.id):
+                if member != user_id:
+                    await self.handlers.send(
+                        self.bot, member,
+                        f"💥 У {name} срыв в челлендже {challenge.emoji} <b>{escape(challenge.title)}</b>",
+                    )
+        return web.json_response({"marked": marked})
+
+    async def _leave_challenge(self, request: web.Request) -> web.Response:
+        user_id = request["user_id"]
+        challenge = self._member_challenge(user_id, request.match_info["challenge_id"])
+        if challenge.creator_id == user_id:
+            self.db.delete_challenge(challenge.id)
+        else:
+            self.db.leave_challenge(challenge.id, user_id)
         return web.json_response({"ok": True})
 
     # ---- sections (per-user names / visibility) -------------------------------

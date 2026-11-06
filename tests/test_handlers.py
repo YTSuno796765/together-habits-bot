@@ -234,3 +234,15 @@ def test_weekly_habit_reminders_and_stats(hx):
         assert hx.h.pending_count(1, today) == 0  # weekly target already met
     stats = hx.press(1, "stats:p")
     assert "нед." in stats.edits[-1][0] and "1 раз в неделю" in stats.edits[-1][0]
+
+
+def test_join_challenge_by_deep_link(hx):
+    from datetime import date
+
+    hx.start(1)
+    ch = hx.db.create_challenge(1, "Зал", days=7, start=date.today(), stake="кофе")
+    reply = hx.start(2, [f"ch_{ch.invite_code}"])
+    assert "Ты в челлендже" in reply.replies[-1][0] and "кофе" in reply.replies[-1][0]
+    assert 2 in hx.db.challenge_members(ch.id)
+    bad = hx.start(2, ["ch_nope"])
+    assert "не найден" in bad.replies[-1][0]

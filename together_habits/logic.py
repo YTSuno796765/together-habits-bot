@@ -341,6 +341,34 @@ def due_today(
     return is_scheduled(schedule, today)
 
 
+# ---- challenges -------------------------------------------------------------------
+
+
+def challenge_scores(
+    kind: str,
+    start: date,
+    end: date,
+    today: date,
+    marks: Mapping[int, set[date]],
+    members: Iterable[int],
+) -> dict[int, int]:
+    """Points so far: marked days ("do") or days without a slip ("avoid")."""
+    last = min(today, end)
+    elapsed = (last - start).days + 1 if last >= start else 0
+    scores = {}
+    for user in members:
+        in_range = {d for d in marks.get(user, set()) if start <= d <= last}
+        scores[user] = len(in_range) if kind == "do" else max(0, elapsed - len(in_range))
+    return scores
+
+
+def challenge_winners(scores: Mapping[int, int]) -> list[int]:
+    if not scores:
+        return []
+    best = max(scores.values())
+    return [user for user, score in scores.items() if score == best] if best > 0 else []
+
+
 def ratio(done: int, total: int) -> float | None:
     return done / total if total else None
 

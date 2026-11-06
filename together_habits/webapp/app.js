@@ -118,7 +118,12 @@
   async function loadState() {
     if (state.scope === "plan") {
       if (!state.month) state.month = new Date().toISOString().slice(0, 7);
-      state.plans = await api("/api/plans?month=" + state.month);
+      const [plans, challenges] = await Promise.all([
+        api("/api/plans?month=" + state.month),
+        api("/api/challenges"),
+      ]);
+      state.plans = plans;
+      state.challenges = challenges;
       if (!state.selectedDay) state.selectedDay = state.plans.today;
       state.sections = state.plans.sections;
       return;
@@ -233,6 +238,7 @@
   }
 
   function renderPlans() {
+    if (state.plansView === "challenges") return renderChallenges();
     const P = state.plans;
     const activeScopes = ["f", "c"].filter((s) => P.pairs[s].status === "active" && !sectionInfo(s).hidden);
     const header = h("div", { class: "topbar" },
@@ -247,7 +253,8 @@
         !sectionInfo("f").hidden ? [h("span", { class: "lg f" }), sectionInfo("f").name || "с другом"] : null,
         !sectionInfo("c").hidden ? [h("span", { class: "lg c" }), sectionInfo("c").name || "с парой"] : null,
         h("span", { class: "lg pending" }), "ждёт ответа"),
-      renderTabs()];
+      renderTabs(),
+      plansSubTabs()];
 
     if (!activeScopes.length) {
       page.push(h("div", { class: "panel hero" },
@@ -283,6 +290,168 @@
       page.push(h("div", { class: "section-title" }, "Ближайшие"), h("div", { class: "plan-list" }, later.slice(0, 8).map((x) => planCard(x, false, true))));
     }
     app.replaceChildren(h("div", { class: "fade-in" }, page));
+  }
+
+  function plansSubTabs() {
+    const view = state.plansView || "calendar";
+    const active = (state.challenges && state.challenges.active.length) || 0;
+    return h("div", { class: "tabs kind-tabs sub" },
+      h("button", { class: "tab" + (view === "calendar" ? " active" : ""), onclick: () => { state.plansView = "calendar"; haptic("select"); render(); } }, "📅 Календарь"),
+      h("button", { class: "tab" + (view === "challenges" ? " active" : ""), onclick: () => { state.plansView = "challenges"; haptic("select"); render(); } }, "🏆 Челленджи" + (active ? " · " + active : "")),
+    );
+  }
+
+  // ---------- challenges ----------
+  function renderChallenges() {
+    const C = state.challenges;
+    const header = h("div", { class: "topbar" },
+      formatDate(C.today),
+      h("div", { class: "actions" },
+        h("button", { class: "icon-btn", "aria-label": "Новый челлендж", onclick: openChallengeSheet }, icon("plus")),
+        settingsButton(),
+      ),
+    );
+    const page = [header, h("h1", null, "Челленджи"),
+      h("p", { class: "subtitle" }, "Соревнуйтесь вдвоём или компанией до 10 человек"),
+      renderTabs(), plansSubTabs()];
+    if (!C.active.length) {
+      page.push(h("div", { class: "panel hero" },
+        h("div", { class: "big" }, "🏆"),
+        h("h2", null, "Брось вызов"),
+        h("p", null, "«Кто чаще сходит в зал за 2 недели» или «кто дольше без сладкого». Можно поставить на кон кофе — бот сам подведёт итог."),
+        h("button", { class: "btn", onclick: openChallengeSheet }, icon("plus"), "Создать челлендж"),
+      ));
+    } else {
+      page.push(h("div", { class: "plan-list" }, C.active.map(challengeCard)));
+    }
+    if (C.finished.length) {
+      page.push(h("div", { class: "section-title" }, "Завершённые"),
+        h("div", { class: "plan-list" }, C.finished.map((c) => h("div", { class: "plan finished" },
+          h("div", { class: "plan-icon" }, c.emoji),
+          h("div", { class: "plan-body" },
+            h("div", { class: "plan-title" }, c.title),
+            h("div", { class: "plan-meta" }, c.winners.length ? "🏆 " + c.winners.join(", ") : "без победителя"),
+          ),
+        ))));
+    }
+    app.replaceChildren(h("div", { class: "fade-in" }, page));
+  }
+
+  function challengeCard(c) {
+    const isAvoid = c.kind === "avoid";
+    const unit = isAvoid ? "без срыва" : "дн.";
+    const medals = ["🥇", "🥈", "🥉"];
+    const progress = Math.round((c.dayNumber / c.days) * 100);
+    return h("div", { class: "panel challenge" + (isAvoid ? " avoid" : "") },
+      h("div", { class: "ch-head" },
+        h("div", { class: "plan-icon" }, c.emoji),
+        h("div", { class: "plan-body" },
+          h("div", { class: "plan-title" }, c.title),
+          h("div", { class: "plan-meta" }, "день " + c.dayNumber + " из " + c.days + " · до " + dayTitle(c.end)),
+        ),
+      ),
+      h("div", { class: "goal-bar ch-progress" }, h("i", { style: "width:" + progress + "%" })),
+      c.stake ? h("div", { class: "ch-stake" }, "💸 " + c.stake) : null,
+      h("div", { class: "leaderboard" }, c.members.map((m, i) => h("div", { class: "lb-row" + (m.me ? " me" : "") },
+        h("span", { class: "lb-rank" }, medals[i] || String(i + 1)),
+        h("span", { class: "lb-name" }, m.me ? "Ты" : m.name),
+        isAvoid ? (m.markedToday ? h("span", { class: "lb-today bad" }, "срыв") : null)
+          : (m.markedToday ? h("span", { class: "lb-today" }, "✓ сегодня") : null),
+        h("span", { class: "lb-score" }, m.score + " " + unit),
+      ))),
+      h("div", { class: "plan-actions" },
+        isAvoid
+          ? h("button", { class: "pbtn " + (c.markedToday ? "no" : "danger"), onclick: () => markChallenge(c) }, c.markedToday ? "Отменить срыв" : "Срыв")
+          : h("button", { class: "pbtn " + (c.markedToday ? "no" : "yes"), onclick: () => markChallenge(c) }, c.markedToday ? "Снять отметку" : "✓ Сделал сегодня"),
+        h("button", { class: "pbtn no", onclick: () => shareChallenge(c) }, "Позвать"),
+      ),
+      h("button", { class: "link-danger ch-leave", onclick: () => leaveChallenge(c) }, c.isCreator ? "Удалить челлендж" : "Выйти из челленджа"),
+    );
+  }
+
+  async function markChallenge(c) {
+    if (c.kind === "avoid" && !c.markedToday && !(await confirmDialog("Отметить срыв? Остальные участники узнают."))) return;
+    try {
+      const res = await api("/api/challenges/" + c.id + "/mark", { method: "POST", body: {} });
+      haptic(res.marked && c.kind !== "avoid" ? "success" : "light");
+      await refresh();
+      toast(c.kind === "avoid" ? (res.marked ? "Срыв отмечен" : "Срыв отменён") : (res.marked ? "Засчитано 💪" : "Отметка снята"));
+    } catch (err) {
+      toast(err.message);
+    }
+  }
+
+  function shareChallenge(c) {
+    if (!c.link) return toast("Ссылка пока недоступна");
+    const text = c.emoji + " Челлендж «" + c.title + "» на " + c.days + " дней" + (c.stake ? ". Ставка: " + c.stake : "") + ". Залетай!";
+    const url = "https://t.me/share/url?url=" + encodeURIComponent(c.link) + "&text=" + encodeURIComponent(text);
+    if (tg && tg.openTelegramLink) tg.openTelegramLink(url);
+    else window.open(url, "_blank");
+  }
+
+  async function leaveChallenge(c) {
+    const text = c.isCreator ? "Удалить челлендж «" + c.title + "» у всех участников?" : "Выйти из челленджа «" + c.title + "»? Твои отметки удалятся.";
+    if (!(await confirmDialog(text))) return;
+    try {
+      await api("/api/challenges/" + c.id, { method: "DELETE" });
+      await refresh();
+      toast(c.isCreator ? "Челлендж удалён" : "Ты больше не в челлендже");
+    } catch (err) {
+      toast(err.message);
+    }
+  }
+
+  function openChallengeSheet() {
+    haptic("light");
+    const P = state.plans;
+    const partners = ["f", "c"].filter((s) => P.pairs[s].status === "active");
+    const form = { kind: "do", title: "", emoji: "🏆", days: 14, stake: "", invite: new Set(partners) };
+    const IDEAS = { do: [["🏋️", "Зал"], ["🏃", "Пробежка"], ["📖", "Чтение 20 минут"], ["💪", "100 отжиманий"], ["🌅", "Подъём до 7:00"]], avoid: [["🍬", "Без сладкого"], ["🚭", "Без сигарет"], ["📱", "Без соцсетей"], ["🍺", "Без алкоголя"], ["🍔", "Без фастфуда"]] };
+    openSheet(() => {
+      const submit = h("button", { class: "btn", disabled: true, onclick: () => create() }, "Бросить вызов");
+      const title = h("input", { class: "input", maxlength: "40", placeholder: "Например, «Зал»", oninput: (e) => { form.title = e.target.value; paint(); } });
+      const stake = h("input", { class: "input", maxlength: "80", placeholder: "Например, «проигравший покупает кофе»", oninput: (e) => { form.stake = e.target.value; } });
+      const kindButtons = [["do", "Кто чаще"], ["avoid", "Кто дольше без"]].map(([k, label]) => h("button", { class: "tab", onclick: () => { form.kind = k; paint(); haptic("select"); } }, label));
+      const ideasBox = h("div", { class: "chips" });
+      const dayButtons = [7, 14, 21, 30].map((n) => h("button", { class: "day", onclick: () => { form.days = n; paint(); haptic("select"); } }, n + " дн."));
+      const inviteRows = partners.map((s) => {
+        const sw = h("button", { class: "switch on", role: "switch", onclick: () => { form.invite.has(s) ? form.invite.delete(s) : form.invite.add(s); sw.classList.toggle("on", form.invite.has(s)); haptic("select"); } }, h("span"));
+        return h("div", { class: "set-row" }, h("span", null, (s === "f" ? "🤝 " : "💞 ") + P.pairs[s].partner), sw);
+      });
+      function paint() {
+        kindButtons.forEach((b, i) => b.classList.toggle("active", (i === 1) === (form.kind === "avoid")));
+        dayButtons.forEach((b, i) => b.classList.toggle("on", [7, 14, 21, 30][i] === form.days));
+        ideasBox.replaceChildren(...IDEAS[form.kind].map(([em, t]) => h("button", { class: "chip", onclick: () => { form.title = t; title.value = t; form.emoji = em; paint(); } }, em + " " + t)));
+        submit.disabled = !form.title.trim();
+      }
+      async function create() {
+        submit.disabled = true;
+        try {
+          const ch = await api("/api/challenges", { method: "POST", body: { title: form.title, emoji: form.emoji, kind: form.kind, days: form.days, stake: form.stake, invite: Array.from(form.invite) } });
+          haptic("success");
+          closeSheet();
+          state.plansView = "challenges";
+          await refresh();
+          toast("Вызов брошен 🏆");
+          if (!form.invite.size) shareChallenge(ch);
+        } catch (err) {
+          submit.disabled = false;
+          toast(err.message);
+        }
+      }
+      paint();
+      return h("div", null,
+        h("h2", null, "Новый челлендж"),
+        h("div", { class: "tabs kind-tabs" }, kindButtons),
+        h("div", { class: "field-label" }, "Идеи"), ideasBox,
+        h("div", { class: "field-label" }, "Название"), title,
+        h("div", { class: "field-label" }, "Длительность"), h("div", { class: "days four-col" }, dayButtons),
+        h("div", { class: "field-label" }, "Ставка (необязательно)"), stake,
+        partners.length ? [h("div", { class: "field-label" }, "Сразу позвать"), inviteRows] : null,
+        h("div", { class: "section-hint", style: "margin-top:12px" }, "После создания можно позвать кого угодно по ссылке — до 10 участников."),
+        submit,
+      );
+    });
   }
 
   function renderCalendar(P) {
@@ -593,6 +762,7 @@
         h("div", { class: "week", "aria-label": "Эта неделя" }, x.week.map((w) => h("span", { class: "seg " + w.status, title: w.date }))),
         h("div", { class: "habit-foot" },
           personDots(x, isAvoid ? "bad" : "good"),
+          x.reactionToMe ? h("span", { class: "reaction-badge", title: "Реакция " + state.data.pair.partner }, x.reactionToMe) : null,
           h("span", { class: "streak" + (isAvoid ? " clean" : ""), "aria-label": (isAvoid ? "Без срывов " : "Серия ") + x.streak },
             isAvoid ? icon("shield") : icon("flame"), String(x.streak),
             isAvoid || x.weeklyTarget ? h("small", null, " " + x.streakUnit) : null),
@@ -1321,6 +1491,7 @@
       h("div", { class: "week", style: "margin:18px 0 6px" }, x.week.map((w) => h("span", { class: "seg " + w.status }))),
       h("div", { class: "labels" }, WEEKDAYS.map((w) => h("span", null, w))),
       x.targetAmount ? amountControl(x, "today", x.myAmount) : null,
+      x.partnerDone !== null && x.partnerDone !== undefined && x.kind !== "avoid" ? socialBlock(x) : null,
       extra,
       h("div", { class: "detail-actions" },
         h("button", { class: "btn ghost", onclick: () => { closeSheet(); openAddSheet(x.kind, x); } }, "✏️ Изменить"),
@@ -1356,6 +1527,51 @@
       ),
     ));
     loadHabitDetails(x, extra);
+  }
+
+  function socialBlock(x) {
+    const partner = state.data.pair.partner;
+    if (x.partnerDone) {
+      const buttons = ["🔥", "👏", "💪", "❤️", "😎"].map((em) => h("button", {
+        class: "mood" + (x.myReaction === em ? " on" : ""),
+        onclick: async () => {
+          try {
+            await api("/api/react", { method: "POST", body: { habitId: x.id, emoji: x.myReaction === em ? null : em } });
+            haptic("success");
+            x.myReaction = x.myReaction === em ? null : em;
+            buttons.forEach((b) => b.classList.toggle("on", b.textContent === x.myReaction));
+            toast(x.myReaction ? "Реакция отправлена " + em : "Реакция убрана");
+            loadState();
+          } catch (err) {
+            toast(err.message);
+          }
+        },
+      }, em));
+      return h("div", { class: "panel social" },
+        h("div", { class: "field-label", style: "margin:0 0 10px" }, partner + " уже сделал(а) — поддержи"),
+        h("div", { class: "mood-row" }, buttons),
+        x.reactionToMe ? h("div", { class: "mood-partner" }, partner + " реагирует на тебя: " + x.reactionToMe) : null,
+      );
+    }
+    return h("div", { class: "panel social" },
+      h("div", { class: "field-label", style: "margin:0 0 10px" }, partner + " ещё не отметил(а)"),
+      h("button", {
+        class: "btn " + (x.nudgedToday ? "ghost" : ""), disabled: x.nudgedToday,
+        onclick: async (e) => {
+          try {
+            await api("/api/nudge", { method: "POST", body: { habitId: x.id } });
+            haptic("success");
+            e.currentTarget.disabled = true;
+            x.nudgedToday = true;
+            toast("Напоминание отправлено 👊");
+            loadState();
+          } catch (err) {
+            toast(err.message);
+          }
+        },
+      }, x.nudgedToday ? "Сегодня уже напоминание было" : "👊 Пнуть " + partner),
+      x.reactionToMe ? h("div", { class: "mood-partner" }, partner + " реагирует на тебя: " + x.reactionToMe) : null,
+    );
   }
 
   function amountControl(x, when, value) {
