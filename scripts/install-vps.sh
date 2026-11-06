@@ -130,6 +130,7 @@ if systemctl is-active -q "$SERVICE"; then
   done
   echo
   echo "Bot is running. Open it in Telegram and send /start."
+  echo "Code version: $(git -C "$APP_DIR" log -1 --format='%h  %ad  %s' --date=format:'%Y-%m-%d %H:%M')"
   if [[ -n "$web_ok" ]]; then
     echo "Mini App: https://$DOMAIN (button «Привычки» next to the message field)"
   else

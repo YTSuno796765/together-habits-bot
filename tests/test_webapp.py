@@ -388,3 +388,21 @@ def test_weekly_target_habit():
         assert stats["habits"][0]["streakUnit"] == "нед." and stats["rate7"] == 1.0
 
     run(body)
+
+
+def test_index_busts_asset_cache():
+    async def body(env):
+        from together_habits.webapp import asset_version
+
+        resp = await env.client.get("/")
+        html = await resp.text()
+        version = asset_version()
+        assert f"/static/app.js?v={version}" in html and f"/static/style.css?v={version}" in html
+        assert "no-store" in resp.headers["Cache-Control"]
+        js = await env.client.get(f"/static/app.js?v={version}")
+        assert js.status == 200 and "immutable" in js.headers["Cache-Control"]
+        bare = await env.client.get("/static/app.js")
+        assert bare.headers["Cache-Control"] == "no-cache"
+        assert (await (await env.client.get("/version")).text()) == version
+
+    run(body)

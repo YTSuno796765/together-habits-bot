@@ -30,6 +30,14 @@ from together_habits.texts import AVOID_TEMPLATES, KIND_SCOPE, SCOPE_KIND, SCOPE
 log = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "webapp"
+
+
+def asset_version() -> str:
+    """Short hash of the UI files; changes with every update."""
+    digest = hashlib.sha256()
+    for name in ("index.html", "app.js", "style.css"):
+        digest.update((STATIC_DIR / name).read_bytes())
+    return digest.hexdigest()[:10]
 INIT_DATA_MAX_AGE = 24 * 3600
 
 
@@ -88,9 +96,10 @@ class WebApi:
     # ---- app -----------------------------------------------------------------
 
     def build(self) -> web.Application:
-        app = web.Application(middlewares=[self._errors, self._auth], client_max_size=64 * 1024)
+        app = web.Application(middlewares=[self._static_cache, self._errors, self._auth], client_max_size=64 * 1024)
         app.router.add_get("/", self._index)
         app.router.add_get("/healthz", self._health)
+        app.router.add_get("/version", self._version)
         app.router.add_static("/static/", STATIC_DIR, append_version=False)
         app.router.add_get("/api/state", self._state)
         app.router.add_get("/api/stats", self._stats)
@@ -117,6 +126,16 @@ class WebApi:
             return web.json_response({"error": str(exc)}, status=exc.status)
 
     @web.middleware
+    async def _static_cache(self, request: web.Request, handler: Any) -> web.StreamResponse:
+        response = await handler(request)
+        if request.path.startswith("/static/"):
+            # Versioned URLs (?v=hash) may be cached for long; bare ones must revalidate.
+            response.headers["Cache-Control"] = (
+                "public, max-age=31536000, immutable" if "v" in request.query else "no-cache"
+            )
+        return response
+
+    @web.middleware
     async def _auth(self, request: web.Request, handler: Any) -> web.StreamResponse:
         if request.path.startswith("/api/"):
             header = request.headers.get("Authorization", "")
@@ -129,10 +148,22 @@ class WebApi:
         return await handler(request)
 
     async def _index(self, request: web.Request) -> web.StreamResponse:
-        return web.FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})
+        # Asset URLs carry a content hash, so Telegram's webview never keeps an old UI.
+        html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        version = asset_version()
+        for name in ("app.js", "style.css"):
+            html = html.replace(f"/static/{name}", f"/static/{name}?v={version}")
+        return web.Response(
+            text=html,
+            content_type="text/html",
+            headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+        )
 
     async def _health(self, request: web.Request) -> web.Response:
         return web.Response(text="ok")
+
+    async def _version(self, request: web.Request) -> web.Response:
+        return web.Response(text=asset_version(), headers={"Cache-Control": "no-cache"})
 
     # ---- helpers ---------------------------------------------------------------
 
