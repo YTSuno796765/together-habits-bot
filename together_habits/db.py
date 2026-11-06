@@ -40,6 +40,11 @@ CREATE TABLE IF NOT EXISTS habits (
     position INTEGER NOT NULL DEFAULT 0,
     pinned INTEGER NOT NULL DEFAULT 0,
     weekly_target INTEGER,
+    goal_days INTEGER,
+    target_amount INTEGER,
+    unit TEXT,
+    step INTEGER,
+    remind_at TEXT,
     archived INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CHECK ((owner_id IS NULL) <> (pair_id IS NULL))
@@ -49,6 +54,26 @@ CREATE TABLE IF NOT EXISTS checkins (
     user_id INTEGER NOT NULL REFERENCES users(id),
     day TEXT NOT NULL,
     PRIMARY KEY (habit_id, user_id, day)
+);
+CREATE TABLE IF NOT EXISTS amounts (
+    habit_id INTEGER NOT NULL REFERENCES habits(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    day TEXT NOT NULL,
+    value INTEGER NOT NULL,
+    PRIMARY KEY (habit_id, user_id, day)
+);
+CREATE TABLE IF NOT EXISTS notes (
+    habit_id INTEGER NOT NULL REFERENCES habits(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    day TEXT NOT NULL,
+    text TEXT NOT NULL,
+    PRIMARY KEY (habit_id, user_id, day)
+);
+CREATE TABLE IF NOT EXISTS freezes (
+    habit_id INTEGER NOT NULL REFERENCES habits(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    day TEXT NOT NULL,
+    PRIMARY KEY (habit_id, day)
 );
 CREATE TABLE IF NOT EXISTS plans (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -78,6 +103,55 @@ CREATE TABLE IF NOT EXISTS moods (
     PRIMARY KEY (pair_id, user_id, day)
 );
 """
+
+
+FREEZES_PER_MONTH = 2
+MAX_NOTE_LENGTH = 300
+
+
+def validate_habit_options(
+    kind: str,
+    *,
+    weekly_target: int | None = None,
+    goal_days: int | None = None,
+    target_amount: int | None = None,
+    unit: str | None = None,
+    step: int | None = None,
+    remind_at: str | None = None,
+) -> dict[str, object]:
+    """Check optional habit settings; returns normalised values or raises ValueError."""
+
+    def whole(value: object, low: int, high: int, name: str) -> int | None:
+        if value is None:
+            return None
+        if not isinstance(value, int) or isinstance(value, bool) or not low <= value <= high:
+            raise ValueError(f"{name} must be {low}..{high}")
+        return value
+
+    weekly_target = whole(weekly_target, 1, 6, "weekly target")
+    goal_days = whole(goal_days, 1, 3650, "goal")
+    target_amount = whole(target_amount, 1, 1_000_000, "target amount")
+    step = whole(step, 1, 1_000_000, "step")
+    if kind != "do" and (weekly_target or target_amount):
+        raise ValueError("weekly target and amounts are for to-do habits")
+    if weekly_target and target_amount:
+        raise ValueError("a habit is either weekly or quantitative")
+    unit = (unit or "").strip()[:12] or None if target_amount else None
+    step = (step or 1) if target_amount else None
+    if remind_at is not None:
+        text = str(remind_at)
+        if len(text) != 5 or text[2] != ":" or not (text[:2] + text[3:]).isdigit() \
+                or int(text[:2]) > 23 or int(text[3:]) > 59:
+            raise ValueError("remind_at must be HH:MM")
+        remind_at = text
+    return {
+        "weekly_target": weekly_target,
+        "goal_days": goal_days,
+        "target_amount": target_amount,
+        "unit": unit,
+        "step": step,
+        "remind_at": remind_at,
+    }
 
 
 class PairError(Exception):
@@ -120,6 +194,16 @@ class Habit:
     pinned: bool = False
     position: int = 0
     weekly_target: int | None = None  # "N times a week" instead of fixed weekdays
+    goal_days: int | None = None  # e.g. 100 days; progress shown on the card
+    target_amount: int | None = None  # quantitative habit: daily amount to reach
+    unit: str | None = None  # "стаканов", "мин", "шагов"
+    step: int | None = None  # how much one "+" adds
+    remind_at: str | None = None  # "HH:MM" personal reminder for this habit
+    archived: bool = False
+
+    @property
+    def is_amount(self) -> bool:
+        return bool(self.target_amount)
 
     @property
     def is_avoid(self) -> bool:
@@ -165,6 +249,15 @@ class Storage:
             self.conn.execute("ALTER TABLE habits ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
         if "weekly_target" not in columns:
             self.conn.execute("ALTER TABLE habits ADD COLUMN weekly_target INTEGER")
+        for column, ddl in (
+            ("goal_days", "INTEGER"),
+            ("target_amount", "INTEGER"),
+            ("unit", "TEXT"),
+            ("step", "INTEGER"),
+            ("remind_at", "TEXT"),
+        ):
+            if column not in columns:
+                self.conn.execute(f"ALTER TABLE habits ADD COLUMN {column} {ddl}")
 
     def close(self) -> None:
         self.conn.close()
@@ -280,6 +373,12 @@ class Storage:
             bool(row["pinned"]),
             row["position"],
             row["weekly_target"],
+            row["goal_days"],
+            row["target_amount"],
+            row["unit"],
+            row["step"],
+            row["remind_at"],
+            bool(row["archived"]),
         )
 
     def add_habit(
@@ -293,12 +392,24 @@ class Storage:
         created: date | None = None,
         kind: str = "do",
         weekly_target: int | None = None,
+        goal_days: int | None = None,
+        target_amount: int | None = None,
+        unit: str | None = None,
+        step: int | None = None,
+        remind_at: str | None = None,
     ) -> Habit:
         if kind not in HABIT_KINDS:
             raise ValueError(f"unknown habit kind: {kind}")
+        extras = validate_habit_options(
+            kind,
+            weekly_target=weekly_target,
+            goal_days=goal_days,
+            target_amount=target_amount,
+            unit=unit,
+            step=step,
+            remind_at=remind_at,
+        )
         if weekly_target is not None:
-            if kind != "do" or not 1 <= weekly_target <= 6:
-                raise ValueError("weekly target must be 1..6 for a to-do habit")
             schedule = EVERY_DAY  # any day may count
         if (owner_id is None) == (pair_id is None):
             raise ValueError("habit needs exactly one of owner_id or pair_id")
@@ -317,21 +428,94 @@ class Storage:
             (owner_id if owner_id is not None else pair_id,),
         ).fetchone()
         cur = self.conn.execute(
-            "INSERT INTO habits "
-            "(title, emoji, owner_id, pair_id, schedule, created_at, kind, position, weekly_target) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (title, emoji, owner_id, pair_id, schedule, created_at, kind, row["next"], weekly_target),
+            "INSERT INTO habits (title, emoji, owner_id, pair_id, schedule, created_at, kind, "
+            "position, weekly_target, goal_days, target_amount, unit, step, remind_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                title, emoji, owner_id, pair_id, schedule, created_at, kind, row["next"],
+                extras["weekly_target"], extras["goal_days"], extras["target_amount"],
+                extras["unit"], extras["step"], extras["remind_at"],
+            ),
         )
         self.conn.commit()
         habit = self.get_habit(cur.lastrowid)
         assert habit is not None
         return habit
 
-    def get_habit(self, habit_id: int) -> Habit | None:
-        row = self.conn.execute(
-            "SELECT * FROM habits WHERE id = ? AND archived = 0", (habit_id,)
-        ).fetchone()
+    def get_habit(self, habit_id: int, *, include_archived: bool = False) -> Habit | None:
+        query = "SELECT * FROM habits WHERE id = ?" + ("" if include_archived else " AND archived = 0")
+        row = self.conn.execute(query, (habit_id,)).fetchone()
         return self._habit(row) if row else None
+
+    def update_habit(
+        self,
+        habit_id: int,
+        *,
+        title: str | None = None,
+        emoji: str | None = None,
+        schedule: int | None = None,
+        weekly_target: int | None | object = ...,
+        goal_days: int | None | object = ...,
+        target_amount: int | None | object = ...,
+        unit: str | None | object = ...,
+        step: int | None | object = ...,
+        remind_at: str | None | object = ...,
+    ) -> Habit:
+        """Change a habit's settings. `...` keeps a value; None clears an optional one."""
+        habit = self.get_habit(habit_id)
+        if habit is None:
+            raise ValueError("habit not found")
+        merged = {
+            "weekly_target": habit.weekly_target if weekly_target is ... else weekly_target,
+            "goal_days": habit.goal_days if goal_days is ... else goal_days,
+            "target_amount": habit.target_amount if target_amount is ... else target_amount,
+            "unit": habit.unit if unit is ... else unit,
+            "step": habit.step if step is ... else step,
+            "remind_at": habit.remind_at if remind_at is ... else remind_at,
+        }
+        extras = validate_habit_options(habit.kind, **merged)  # type: ignore[arg-type]
+        new_title = habit.title if title is None else title.strip()[:40]
+        if not new_title:
+            raise ValueError("habit title is empty")
+        new_emoji = habit.emoji if emoji is None else (emoji.strip()[:8] or "⭐")
+        new_schedule = habit.schedule if schedule is None else schedule
+        if extras["weekly_target"] is not None:
+            new_schedule = EVERY_DAY
+        if not 1 <= new_schedule <= EVERY_DAY:
+            raise ValueError("schedule must select at least one weekday")
+        self.conn.execute(
+            "UPDATE habits SET title = ?, emoji = ?, schedule = ?, weekly_target = ?, goal_days = ?, "
+            "target_amount = ?, unit = ?, step = ?, remind_at = ? WHERE id = ?",
+            (
+                new_title, new_emoji, new_schedule, extras["weekly_target"], extras["goal_days"],
+                extras["target_amount"], extras["unit"], extras["step"], extras["remind_at"], habit_id,
+            ),
+        )
+        self.conn.commit()
+        updated = self.get_habit(habit_id)
+        assert updated is not None
+        return updated
+
+    def list_archived(self, *, owner_id: int | None = None, pair_id: int | None = None) -> list[Habit]:
+        column, value = ("owner_id", owner_id) if owner_id is not None else ("pair_id", pair_id)
+        rows = self.conn.execute(
+            f"SELECT * FROM habits WHERE {column} = ? AND archived = 1 ORDER BY id DESC", (value,)
+        )
+        return [self._habit(row) for row in rows]
+
+    def restore_habit(self, habit_id: int) -> None:
+        habit = self.get_habit(habit_id, include_archived=True)
+        if habit is None:
+            raise ValueError("habit not found")
+        active = self.list_habits(owner_id=habit.owner_id, pair_id=habit.pair_id)
+        if len(active) >= MAX_HABITS_PER_SCOPE:
+            raise ValueError("too many habits")
+        self.conn.execute("UPDATE habits SET archived = 0 WHERE id = ?", (habit_id,))
+        self.conn.commit()
+
+    def delete_habit_forever(self, habit_id: int) -> None:
+        self.conn.execute("DELETE FROM habits WHERE id = ?", (habit_id,))
+        self.conn.commit()
 
     def list_habits(self, *, owner_id: int | None = None, pair_id: int | None = None) -> list[Habit]:
         if owner_id is not None:
@@ -396,6 +580,110 @@ class Storage:
         for row in rows:
             result.setdefault(date.fromisoformat(row["day"]), set()).add(row["user_id"])
         return result
+
+    # ---- amounts (quantitative habits) ---------------------------------------
+
+    def amounts(self, habit_id: int) -> dict[date, dict[int, int]]:
+        result: dict[date, dict[int, int]] = {}
+        rows = self.conn.execute(
+            "SELECT user_id, day, value FROM amounts WHERE habit_id = ?", (habit_id,)
+        )
+        for row in rows:
+            result.setdefault(date.fromisoformat(row["day"]), {})[row["user_id"]] = row["value"]
+        return result
+
+    def set_amount(self, habit: Habit, user_id: int, day: date, value: int) -> bool:
+        """Store the day's amount; keeps the check-in in sync. Returns True if the target is met."""
+        if not habit.target_amount:
+            raise ValueError("not a quantitative habit")
+        value = max(0, min(int(value), 10_000_000))
+        key = (habit.id, user_id, day.isoformat())
+        with self.conn:
+            if value:
+                self.conn.execute(
+                    "INSERT INTO amounts (habit_id, user_id, day, value) VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(habit_id, user_id, day) DO UPDATE SET value = excluded.value",
+                    (*key, value),
+                )
+            else:
+                self.conn.execute(
+                    "DELETE FROM amounts WHERE habit_id = ? AND user_id = ? AND day = ?", key
+                )
+            met = value >= habit.target_amount
+            if met:
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO checkins (habit_id, user_id, day) VALUES (?, ?, ?)", key
+                )
+            else:
+                self.conn.execute(
+                    "DELETE FROM checkins WHERE habit_id = ? AND user_id = ? AND day = ?", key
+                )
+        return met
+
+    # ---- notes ---------------------------------------------------------------
+
+    def set_note(self, habit_id: int, user_id: int, day: date, text: str) -> None:
+        text = text.strip()[:MAX_NOTE_LENGTH]
+        key = (habit_id, user_id, day.isoformat())
+        if text:
+            self.conn.execute(
+                "INSERT INTO notes (habit_id, user_id, day, text) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(habit_id, user_id, day) DO UPDATE SET text = excluded.text",
+                (*key, text),
+            )
+        else:
+            self.conn.execute("DELETE FROM notes WHERE habit_id = ? AND user_id = ? AND day = ?", key)
+        self.conn.commit()
+
+    def notes(self, habit_id: int, limit: int = 30) -> list[tuple[date, int, str]]:
+        rows = self.conn.execute(
+            "SELECT day, user_id, text FROM notes WHERE habit_id = ? ORDER BY day DESC LIMIT ?",
+            (habit_id, limit),
+        )
+        return [(date.fromisoformat(r["day"]), r["user_id"], r["text"]) for r in rows]
+
+    # ---- streak freezes --------------------------------------------------------
+
+    def freezes(self, habit_id: int) -> dict[date, int]:
+        """day -> user who spent the freeze."""
+        rows = self.conn.execute("SELECT day, user_id FROM freezes WHERE habit_id = ?", (habit_id,))
+        return {date.fromisoformat(r["day"]): r["user_id"] for r in rows}
+
+    def freezes_used(self, user_id: int, month: date) -> int:
+        prefix = month.strftime("%Y-%m")
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM freezes WHERE user_id = ? AND substr(day, 1, 7) = ?",
+            (user_id, prefix),
+        ).fetchone()
+        return row["n"]
+
+    def add_freeze(self, habit_id: int, user_id: int, day: date) -> None:
+        if self.freezes_used(user_id, day) >= FREEZES_PER_MONTH:
+            raise ValueError("no freezes left this month")
+        try:
+            self.conn.execute(
+                "INSERT INTO freezes (habit_id, user_id, day) VALUES (?, ?, ?)",
+                (habit_id, user_id, day.isoformat()),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("this day is already frozen") from exc
+        self.conn.commit()
+
+    def remove_freeze(self, habit_id: int, user_id: int, day: date) -> bool:
+        deleted = self.conn.execute(
+            "DELETE FROM freezes WHERE habit_id = ? AND user_id = ? AND day = ?",
+            (habit_id, user_id, day.isoformat()),
+        ).rowcount
+        self.conn.commit()
+        return bool(deleted)
+
+    def set_checkin(self, habit_id: int, user_id: int, day: date, checked: bool) -> None:
+        key = (habit_id, user_id, day.isoformat())
+        if checked:
+            self.conn.execute("INSERT OR IGNORE INTO checkins (habit_id, user_id, day) VALUES (?, ?, ?)", key)
+        else:
+            self.conn.execute("DELETE FROM checkins WHERE habit_id = ? AND user_id = ? AND day = ?", key)
+        self.conn.commit()
 
     # ---- moods -------------------------------------------------------------
 

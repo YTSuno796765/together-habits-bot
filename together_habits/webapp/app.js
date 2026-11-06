@@ -533,6 +533,9 @@
         : h("button", { class: "avoid-empty", onclick: () => openAddSheet("avoid") },
           "🚫 Добавь то, от чего отказываешься: курение, сладкое, думскроллинг…"),
     );
+    if (d.archivedCount) {
+      out.push(h("button", { class: "archive-link", onclick: openArchiveSheet }, "🗄 Архив · " + d.archivedCount));
+    }
     return out;
   }
 
@@ -557,21 +560,35 @@
         "aria-pressed": x.meMarked ? "true" : "false",
         onclick: (e) => { e.stopPropagation(); toggle(x, e.currentTarget); },
       }, x.meMarked ? "Отменить" : "Срыв")
-      : h("button", {
-        class: "check" + (x.meMarked ? " on" : ""),
-        "aria-label": x.meMarked ? "Снять отметку" : "Отметить выполнение",
-        "aria-pressed": x.meMarked ? "true" : "false",
-        onclick: (e) => { e.stopPropagation(); toggle(x, e.currentTarget); },
-      }, icon("check"));
+      : x.targetAmount
+        ? h("button", {
+          class: "check plus" + (x.meMarked ? " on" : ""),
+          "aria-label": "Добавить " + (x.step || 1),
+          onclick: (e) => { e.stopPropagation(); addAmount(x, e.currentTarget); },
+        }, x.meMarked ? icon("check") : "+" + (x.step || 1))
+        : h("button", {
+          class: "check" + (x.meMarked ? " on" : ""),
+          "aria-label": x.meMarked ? "Снять отметку" : "Отметить выполнение",
+          "aria-pressed": x.meMarked ? "true" : "false",
+          onclick: (e) => { e.stopPropagation(); toggle(x, e.currentTarget); },
+        }, icon("check"));
 
     const meta = (x.pinned ? "📌 " : "") + (isAvoid
       ? (x.meMarked ? "срыв сегодня" : x.partnerMarked ? "срыв у " + state.data.pair.partner : "держусь")
-      : x.scheduleLabel + (x.weeklyTarget ? " · " + x.weekDone + "/" + x.weeklyTarget : ""));
+      : x.targetAmount
+        ? x.myAmount + "/" + x.targetAmount + (x.unit ? " " + x.unit : "") + (x.partnerAmount != null ? " · " + initial(state.data.pair.partner) + ": " + x.partnerAmount : "")
+        : x.scheduleLabel + (x.weeklyTarget ? " · " + x.weekDone + "/" + x.weeklyTarget : ""));
+    const goal = x.goalDays
+      ? h("div", { class: "goal-line", title: "Цель: " + x.goalProgress + "/" + x.goalDays },
+        h("span", { class: "goal-bar" }, h("i", { style: "width:" + Math.min(100, Math.round((x.goalProgress / x.goalDays) * 100)) + "%" })),
+        h("small", null, Math.min(x.goalProgress, x.goalDays) + "/" + x.goalDays))
+      : null;
 
     return h("div", { class: classes.join(" "), role: "button", tabindex: "0", onclick: () => openHabitSheet(x) },
       h("div", { class: "habit-top" }, h("div", { class: "habit-icon" }, x.emoji), action),
       h("div", { class: "habit-title" }, x.title),
       h("div", { class: "habit-meta" }, meta),
+      goal,
       h("div", { class: "habit-bottom" },
         h("div", { class: "week", "aria-label": "Эта неделя" }, x.week.map((w) => h("span", { class: "seg " + w.status, title: w.date }))),
         h("div", { class: "habit-foot" },
@@ -722,6 +739,24 @@
     await refresh();
   }
 
+  async function addAmount(habit, button) {
+    if (state.busy) return;
+    state.busy = true;
+    button.classList.add("pop");
+    try {
+      const res = await api("/api/amount", { method: "POST", body: { habitId: habit.id } });
+      haptic(res.met ? "success" : "light");
+      await loadState();
+      render();
+      if (res.met && !habit.meMarked) toast("Норма выполнена ✅");
+      else if (!res.met) toast(res.value + " из " + habit.targetAmount + (habit.unit ? " " + habit.unit : ""));
+    } catch (err) {
+      toast(err.message);
+    } finally {
+      state.busy = false;
+    }
+  }
+
   async function toggle(habit, button) {
     if (state.busy) return;
     const isAvoid = habit.kind === "avoid";
@@ -825,31 +860,45 @@
     if (closeCurrentSheet) closeCurrentSheet();
   }
 
-  function openAddSheet(kind) {
+  function openAddSheet(kind, existing) {
     haptic("light");
-    const form = { kind: kind === "avoid" ? "avoid" : "do", title: "", emoji: kind === "avoid" ? "🚫" : "⭐", schedule: 127, weekly: 0 };
+    const editing = Boolean(existing);
+    const src = existing || {};
+    const form = {
+      kind: editing ? src.kind : (kind === "avoid" ? "avoid" : "do"),
+      title: src.title || "",
+      emoji: src.emoji || (kind === "avoid" ? "🚫" : "⭐"),
+      schedule: src.schedule || 127,
+      weekly: src.weeklyTarget || 0,
+      amountOn: Boolean(src.targetAmount),
+      target: src.targetAmount || 8,
+      unit: src.unit || "",
+      step: src.step || 1,
+      goal: src.goalDays || 0,
+      remindAt: src.remindAt || "",
+    };
     openSheet(() => {
-      const submit = h("button", { class: "btn", disabled: true, onclick: () => save() }, "Добавить");
+      const submit = h("button", { class: "btn", disabled: true, onclick: () => save() }, editing ? "Сохранить" : "Добавить");
       const input = h("input", {
-        class: "input", maxlength: "40", enterkeyhint: "done",
-        oninput: (e) => { form.title = e.target.value; paintDays(); },
+        class: "input", maxlength: "40", enterkeyhint: "done", value: form.title,
+        oninput: (e) => { form.title = e.target.value; paint(); },
       });
       const emojiButtons = EMOJIS.map((em) => h("button", {
         class: "emoji-opt",
-        onclick: () => { form.emoji = em; paintEmoji(); haptic("select"); },
+        onclick: () => { form.emoji = em; paint(); haptic("select"); },
       }, em));
       const dayButtons = WEEKDAYS.map((label, i) => h("button", {
-        class: "day on",
-        onclick: () => { form.schedule ^= 1 << i; paintDays(); haptic("select"); },
+        class: "day",
+        onclick: () => { form.schedule ^= 1 << i; paint(); haptic("select"); },
       }, label));
-      const preset = (label, mask) => h("button", { class: "chip", onclick: () => { form.schedule = mask; paintDays(); } }, label);
+      const preset = (label, mask) => h("button", { class: "chip", onclick: () => { form.schedule = mask; paint(); } }, label);
       const daysBox = h("div", null,
         h("div", { class: "days" }, dayButtons),
         h("div", { class: "presets" }, preset("Каждый день", 127), preset("Будни", 31), preset("Выходные", 96)),
       );
       const weeklyButtons = [1, 2, 3, 4, 5, 6].map((n) => h("button", {
         class: "day",
-        onclick: () => { form.weekly = n; paintDays(); haptic("select"); },
+        onclick: () => { form.weekly = n; paint(); haptic("select"); },
       }, n + "×"));
       const weeklyBox = h("div", null,
         h("div", { class: "days six" }, weeklyButtons),
@@ -857,9 +906,37 @@
       );
       const modeButtons = [["days", "По дням"], ["weekly", "Раз в неделю"]].map(([mode, label]) => h("button", {
         class: "tab",
-        onclick: () => { form.weekly = mode === "weekly" ? (form.weekly || 3) : 0; paintDays(); haptic("select"); },
+        onclick: () => { form.weekly = mode === "weekly" ? (form.weekly || 3) : 0; if (form.weekly) form.amountOn = false; paint(); haptic("select"); },
       }, label));
       const modeTabs = h("div", { class: "tabs kind-tabs" }, modeButtons);
+
+      // Quantitative: "8 стаканов воды", one "+" adds `step`.
+      const amountSwitch = h("button", { class: "switch", role: "switch", onclick: () => { form.amountOn = !form.amountOn; if (form.amountOn) form.weekly = 0; paint(); haptic("select"); } }, h("span"));
+      const targetInput = h("input", { class: "input", type: "number", inputmode: "numeric", min: "1", value: String(form.target), oninput: (e) => { form.target = parseInt(e.target.value, 10) || 0; paint(); } });
+      const unitInput = h("input", { class: "input", maxlength: "12", placeholder: "стаканов", value: form.unit, oninput: (e) => { form.unit = e.target.value; } });
+      const stepInput = h("input", { class: "input", type: "number", inputmode: "numeric", min: "1", value: String(form.step), oninput: (e) => { form.step = parseInt(e.target.value, 10) || 0; paint(); } });
+      const amountFields = h("div", { class: "amount-fields" },
+        h("div", null, h("div", { class: "field-label" }, "Норма/день"), targetInput),
+        h("div", null, h("div", { class: "field-label" }, "Единица"), unitInput),
+        h("div", null, h("div", { class: "field-label" }, "Шаг «+»"), stepInput),
+      );
+      const amountBox = h("div", null,
+        h("div", { class: "set-row" }, h("span", null, "Считать количество"), amountSwitch),
+        h("div", { class: "section-hint", style: "margin:6px 4px 0" }, "Например, 8 стаканов воды или 30 минут чтения — нажимаешь «+» в течение дня."),
+        amountFields,
+      );
+
+      const GOALS = [0, 21, 30, 66, 100];
+      const goalButtons = GOALS.map((n) => h("button", { class: "chip", onclick: () => { form.goal = n; goalInput.value = ""; paint(); haptic("select"); } }, n ? n + " дн." : "Без цели"));
+      const goalInput = h("input", { class: "input small", type: "number", inputmode: "numeric", min: "1", max: "3650", placeholder: "Своя", value: GOALS.includes(form.goal) ? "" : String(form.goal), oninput: (e) => { form.goal = parseInt(e.target.value, 10) || 0; paint(); } });
+      const goalLabel = h("div", { class: "field-label" });
+
+      const timeInput = h("input", { class: "input", type: "time", value: form.remindAt, onchange: (e) => { form.remindAt = e.target.value; } });
+      const remindBox = h("div", null,
+        h("div", { class: "field-label" }, "Напомнить в (необязательно)"),
+        h("div", { class: "two-col" }, timeInput, h("button", { class: "btn ghost slim", onclick: () => { form.remindAt = ""; timeInput.value = ""; } }, "Без напоминания")),
+      );
+
       const templatesBox = h("div", null);
       const kindButtons = [["do", "Делать"], ["avoid", "Не делать"]].map(([value, label]) => h("button", {
         class: "tab",
@@ -875,21 +952,27 @@
       }, label));
       const kindHint = h("div", { class: "section-hint" });
 
-      function paintEmoji() {
+      function paint() {
+        const isAvoid = form.kind === "avoid";
+        if (isAvoid) { form.weekly = 0; form.amountOn = false; }
+        const weekly = form.weekly > 0;
         emojiButtons[0].textContent = EMOJIS.includes(form.emoji) ? EMOJIS[0] : form.emoji;
         emojiButtons.forEach((b) => b.classList.toggle("on", b.textContent === form.emoji));
-      }
-      function paintDays() {
-        if (form.kind === "avoid") form.weekly = 0;
-        const weekly = form.weekly > 0;
-        modeTabs.style.display = form.kind === "avoid" ? "none" : "";
+        modeTabs.style.display = isAvoid ? "none" : "";
         modeButtons[0].classList.toggle("active", !weekly);
         modeButtons[1].classList.toggle("active", weekly);
         daysBox.style.display = weekly ? "none" : "";
         weeklyBox.style.display = weekly ? "" : "none";
         weeklyButtons.forEach((b, i) => b.classList.toggle("on", form.weekly === i + 1));
         dayButtons.forEach((b, i) => b.classList.toggle("on", Boolean(form.schedule & (1 << i))));
-        submit.disabled = !form.title.trim() || (!weekly && !form.schedule);
+        amountBox.style.display = isAvoid || weekly ? "none" : "";
+        amountSwitch.classList.toggle("on", form.amountOn);
+        amountFields.style.display = form.amountOn ? "" : "none";
+        remindBox.style.display = isAvoid ? "none" : "";
+        goalLabel.textContent = isAvoid ? "Цель: дней без срыва" : "Цель: сколько раз выполнить";
+        goalButtons.forEach((b, i) => b.classList.toggle("on", GOALS[i] === form.goal));
+        const amountOk = !form.amountOn || (form.target > 0 && form.step > 0);
+        submit.disabled = !form.title.trim() || (!weekly && !form.schedule) || !amountOk;
       }
       function paintKind() {
         const isAvoid = form.kind === "avoid";
@@ -899,32 +982,39 @@
           ? "Каждый день без срыва засчитывается сам. Отмечать нужно только срыв."
           : "Отмечай выполнение каждый день по расписанию.";
         const source = isAvoid ? state.data.avoidTemplates : state.data.templates;
-        const templates = (source || []).filter((t) => !state.data.habits.some((x) => x.title === t.title));
+        const templates = editing ? [] : (source || []).filter((t) => !state.data.habits.some((x) => x.title === t.title));
         templatesBox.replaceChildren(...(templates.length ? [
           h("div", { class: "field-label" }, "Шаблоны"),
           h("div", { class: "chips" }, templates.map((t) => h("button", {
             class: "chip",
-            onclick: () => {
-              form.title = t.title;
-              input.value = t.title;
-              form.emoji = t.emoji;
-              paintEmoji();
-              paintDays();
-              haptic("select");
-            },
+            onclick: () => { form.title = t.title; input.value = t.title; form.emoji = t.emoji; paint(); haptic("select"); },
           }, t.emoji + " " + t.title))),
         ] : []));
-        paintEmoji();
-        paintDays();
+        paint();
       }
       async function save() {
         submit.disabled = true;
+        const weekly = form.weekly > 0;
+        const body = {
+          title: form.title, emoji: form.emoji,
+          schedule: weekly ? 127 : form.schedule,
+          weeklyTarget: weekly ? form.weekly : null,
+          targetAmount: form.amountOn ? form.target : null,
+          unit: form.amountOn ? form.unit : null,
+          step: form.amountOn ? form.step : null,
+          goalDays: form.goal || null,
+          remindAt: form.kind === "do" && form.remindAt ? form.remindAt : null,
+        };
         try {
-          await api("/api/habits", { method: "POST", body: { scope: state.scope, kind: form.kind, title: form.title, emoji: form.emoji, schedule: form.weekly ? 127 : form.schedule, weeklyTarget: form.weekly || null } });
+          if (editing) {
+            await api("/api/habits/" + src.id, { method: "PATCH", body });
+          } else {
+            await api("/api/habits", { method: "POST", body: Object.assign({ scope: state.scope, kind: form.kind }, body) });
+          }
           haptic("success");
           closeSheet();
           await refresh();
-          toast(form.kind === "avoid" ? "Держись! Считаю дни без срывов 🛡" : "Привычка добавлена ✨");
+          toast(editing ? "Сохранено" : form.kind === "avoid" ? "Держись! Считаю дни без срывов 🛡" : "Привычка добавлена ✨");
         } catch (err) {
           submit.disabled = false;
           toast(err.message);
@@ -933,9 +1023,9 @@
 
       paintKind();
       return h("div", null,
-        h("h2", null, "Новая привычка"),
-        h("div", { class: "tabs kind-tabs" }, kindButtons),
-        kindHint,
+        h("h2", null, editing ? "Изменить привычку" : "Новая привычка"),
+        editing ? null : h("div", { class: "tabs kind-tabs" }, kindButtons),
+        editing ? null : kindHint,
         templatesBox,
         h("div", { class: "field-label" }, "Название"),
         input,
@@ -945,9 +1035,59 @@
         modeTabs,
         daysBox,
         weeklyBox,
+        amountBox,
+        goalLabel,
+        h("div", { class: "chips wrap" }, goalButtons, goalInput),
+        remindBox,
         submit,
       );
     });
+  }
+
+  // ---------- archive ----------
+  function openArchiveSheet() {
+    haptic("light");
+    const list = h("div", { class: "plan-list" }, h("div", { class: "empty-day" }, "Загрузка…"));
+    openSheet(() => h("div", null,
+      h("h2", null, "Архив"),
+      h("div", { class: "section-hint" }, "Привычки в архиве не мешают, а история и статистика сохраняются. Можно вернуть в любой момент."),
+      list,
+      h("button", { class: "btn ghost", style: "margin-top:18px", onclick: closeSheet }, "Закрыть"),
+    ));
+    api("/api/archive?scope=" + state.scope).then((res) => {
+      if (!res.habits.length) {
+        list.replaceChildren(h("div", { class: "empty-day" }, "Архив пуст"));
+        return;
+      }
+      list.replaceChildren(...res.habits.map((x) => h("div", { class: "plan archived" },
+        h("div", { class: "plan-icon" }, x.emoji),
+        h("div", { class: "plan-body" },
+          h("div", { class: "plan-title" }, x.title),
+          h("div", { class: "plan-meta" }, (x.kind === "avoid" ? "дней без срыва: " : "выполнено дней: ") + x.doneDays + " · рекорд " + x.best),
+          h("div", { class: "plan-actions" },
+            h("button", { class: "pbtn yes", onclick: () => archiveAction(x, "restore") }, "Вернуть"),
+            h("button", { class: "pbtn no", onclick: () => archiveAction(x, "delete") }, "Удалить"),
+          ),
+        ),
+      )));
+    }).catch((err) => list.replaceChildren(h("div", { class: "empty-day" }, err.message)));
+  }
+
+  async function archiveAction(x, action) {
+    try {
+      if (action === "delete") {
+        if (!(await confirmDialog("Удалить «" + x.title + "» навсегда? История отметок пропадёт."))) return;
+        await api("/api/habits/" + x.id + "?forever=1", { method: "DELETE" });
+        toast("Удалено навсегда");
+      } else {
+        await api("/api/habits/" + x.id + "/restore", { method: "POST", body: {} });
+        toast("Привычка вернулась ✨");
+      }
+      closeSheet();
+      await refresh();
+    } catch (err) {
+      toast(err.message);
+    }
   }
 
   // ---------- section settings ----------
@@ -1158,49 +1298,190 @@
     });
   }
 
+  function shortDay(iso) {
+    const d = dateOf(iso);
+    return WEEKDAYS[(d.getDay() + 6) % 7] + ", " + d.getDate() + " " + MONTHS_GEN[d.getMonth()];
+  }
+
   function openHabitSheet(x) {
     haptic("light");
+    const isAvoid = x.kind === "avoid";
+    const extra = h("div", null, h("div", { class: "empty-day", style: "margin-top:16px" }, "Загрузка…"));
+    const tiles = [
+      tile(String(x.streak), isAvoid ? "дней без срыва" : x.weeklyTarget ? "недель подряд" : "текущая серия"),
+      tile(String(x.best), isAvoid ? "рекорд без срыва" : x.weeklyTarget ? "рекорд, недель" : "рекорд"),
+    ];
+    if (x.goalDays) tiles.push(tile(Math.min(x.goalProgress, x.goalDays) + "/" + x.goalDays, x.goalProgress >= x.goalDays ? "цель достигнута 🏆" : "к цели", true));
     openSheet(() => h("div", null,
       h("div", { class: "detail-head" },
         h("div", { class: "habit-icon" }, x.emoji),
-        h("div", null, h("h2", null, x.title), h("div", { class: "habit-meta" }, x.kind === "avoid" ? "не делать · " + x.scheduleLabel : x.scheduleLabel)),
+        h("div", null, h("h2", null, x.title), h("div", { class: "habit-meta" }, (isAvoid ? "не делать · " : "") + x.scheduleLabel + (x.remindAt ? " · ⏰ " + x.remindAt : ""))),
       ),
-      h("div", { class: "tiles two" },
-        tile(String(x.streak), x.kind === "avoid" ? "дней без срыва" : x.weeklyTarget ? "недель подряд" : "текущая серия"),
-        tile(String(x.best), x.kind === "avoid" ? "рекорд без срыва" : x.weeklyTarget ? "рекорд, недель" : "рекорд")),
+      h("div", { class: "tiles" + (tiles.length === 2 ? " two" : "") }, tiles),
       h("div", { class: "week", style: "margin:18px 0 6px" }, x.week.map((w) => h("span", { class: "seg " + w.status }))),
       h("div", { class: "labels" }, WEEKDAYS.map((w) => h("span", null, w))),
-      h("button", {
-        class: "btn ghost", style: "margin-top:26px",
+      x.targetAmount ? amountControl(x, "today", x.myAmount) : null,
+      extra,
+      h("div", { class: "detail-actions" },
+        h("button", { class: "btn ghost", onclick: () => { closeSheet(); openAddSheet(x.kind, x); } }, "✏️ Изменить"),
+        h("button", {
+          class: "btn ghost",
+          onclick: async () => {
+            try {
+              await api("/api/habits/" + x.id + "/pin", { method: "POST", body: { pinned: !x.pinned } });
+              haptic("success");
+              closeSheet();
+              await refresh();
+              toast(x.pinned ? "Откреплено" : "Закреплено наверху 📌");
+            } catch (err) {
+              toast(err.message);
+            }
+          },
+        }, icon("pin"), x.pinned ? "Открепить" : "Закрепить наверху"),
+        h("button", {
+          class: "btn danger",
+          onclick: async () => {
+            if (!(await confirmDialog("Убрать «" + x.title + "» в архив? История сохранится, вернуть можно в любой момент."))) return;
+            try {
+              await api("/api/habits/" + x.id, { method: "DELETE" });
+              closeSheet();
+              await refresh();
+              toast("Убрано в архив 🗄");
+            } catch (err) {
+              toast(err.message);
+            }
+          },
+        }, "🗄 В архив"),
+        h("button", { class: "btn ghost", onclick: closeSheet }, "Закрыть"),
+      ),
+    ));
+    loadHabitDetails(x, extra);
+  }
+
+  function amountControl(x, when, value) {
+    const step = x.step || 1;
+    const label = h("div", { class: "amount-value" }, value + " / " + x.targetAmount + (x.unit ? " " + x.unit : ""));
+    const send = async (body) => {
+      try {
+        const res = await api("/api/amount", { method: "POST", body: Object.assign({ habitId: x.id, date: when }, body) });
+        label.textContent = res.value + " / " + x.targetAmount + (x.unit ? " " + x.unit : "");
+        haptic(res.met ? "success" : "light");
+        if (res.met && res.value - (body.delta || 0) < x.targetAmount) toast("Норма выполнена ✅");
+        await loadState();
+      } catch (err) {
+        toast(err.message);
+      }
+    };
+    return h("div", { class: "panel amount-box" },
+      h("div", { class: "field-label", style: "margin:0 0 10px" }, when === "today" ? "Сегодня" : "Вчера"),
+      h("div", { class: "amount-row" },
+        h("button", { class: "amount-btn", "aria-label": "Убавить", onclick: () => send({ delta: -step }) }, "−" + step),
+        label,
+        h("button", { class: "amount-btn plus", "aria-label": "Добавить", onclick: () => send({ delta: step }) }, "+" + step),
+      ),
+    );
+  }
+
+  async function loadHabitDetails(x, box) {
+    let info;
+    try {
+      info = await api("/api/habits/" + x.id);
+    } catch (err) {
+      box.replaceChildren(h("div", { class: "empty-day", style: "margin-top:16px" }, err.message));
+      return;
+    }
+    const parts = [];
+    const isAvoid = x.kind === "avoid";
+
+    // Forgot to mark yesterday.
+    if (x.targetAmount) {
+      parts.push(amountControl(x, "yesterday", info.yesterdayAmount || 0));
+    } else {
+      const label = isAvoid
+        ? (info.yesterdayMarked ? "Снять срыв за вчера" : "Отметить срыв за вчера")
+        : (info.yesterdayMarked ? "Снять отметку за вчера" : "↩️ Отметить за вчера");
+      parts.push(h("button", {
+        class: "btn ghost", style: "margin-top:16px",
         onclick: async () => {
+          if (isAvoid && !info.yesterdayMarked && !(await confirmDialog("Отметить срыв за вчера? Серия начнётся заново."))) return;
           try {
-            await api("/api/habits/" + x.id + "/pin", { method: "POST", body: { pinned: !x.pinned } });
+            await api("/api/checkin", { method: "POST", body: { habitId: x.id, date: "yesterday" } });
             haptic("success");
             closeSheet();
             await refresh();
-            toast(x.pinned ? "Откреплено" : "Закреплено наверху 📌");
+            toast(info.yesterdayMarked ? "Отметка за вчера снята" : "Вчерашний день отмечен");
           } catch (err) {
             toast(err.message);
           }
         },
-      }, icon("pin"), x.pinned ? "Открепить" : "Закрепить наверху"),
-      h("button", {
-        class: "btn danger",
+      }, label));
+    }
+
+    // Streak freezes.
+    if (info.freezable.length || info.frozen.length) {
+      parts.push(h("div", { class: "section-title" }, "❄️ Заморозка серии · осталось " + info.freezesLeft + " из 2 в месяце"));
+      parts.push(h("div", { class: "section-hint" }, "Пропуск по уважительной причине засчитается, и серия не сгорит."));
+      const chips = info.freezable.map((day) => h("button", {
+        class: "chip freeze", disabled: info.freezesLeft === 0,
         onclick: async () => {
-          const ok = await confirmDialog("Удалить «" + x.title + "»? История отметок пропадёт.");
-          if (!ok) return;
           try {
-            await api("/api/habits/" + x.id, { method: "DELETE" });
+            await api("/api/freeze", { method: "POST", body: { habitId: x.id, date: day } });
+            haptic("success");
             closeSheet();
             await refresh();
-            toast("Удалено");
+            toast("Заморожено ❄️ Серия спасена");
           } catch (err) {
             toast(err.message);
           }
         },
-      }, "Удалить привычку"),
-      h("button", { class: "btn ghost", onclick: closeSheet }, "Закрыть"),
-    ));
+      }, "❄️ " + shortDay(day)));
+      const frozenChips = info.frozen.filter((f) => f.mine).map((f) => h("button", {
+        class: "chip on",
+        onclick: async () => {
+          try {
+            await api("/api/freeze", { method: "POST", body: { habitId: x.id, date: f.date, remove: true } });
+            closeSheet();
+            await refresh();
+            toast("Заморозка снята");
+          } catch (err) {
+            toast(err.message);
+          }
+        },
+      }, "✕ " + shortDay(f.date)));
+      parts.push(h("div", { class: "chips wrap" }, chips, frozenChips));
+    }
+
+    // Notes.
+    const todayIso = state.data.today;
+    const mine = info.notes.find((n) => n.mine && n.date === todayIso);
+    const noteInput = h("textarea", { class: "input note", maxlength: "300", rows: "2", placeholder: isAvoid ? "Как держишься сегодня?" : "Как прошло? Например, «5 км за 28 минут»" });
+    noteInput.value = mine ? mine.text : "";
+    parts.push(
+      h("div", { class: "section-title" }, "📝 Заметка за сегодня"),
+      noteInput,
+      h("button", {
+        class: "btn ghost slim", style: "margin-top:8px",
+        onclick: async () => {
+          try {
+            await api("/api/note", { method: "POST", body: { habitId: x.id, text: noteInput.value } });
+            haptic("success");
+            toast(noteInput.value.trim() ? "Заметка сохранена" : "Заметка удалена");
+            loadHabitDetails(x, box);
+          } catch (err) {
+            toast(err.message);
+          }
+        },
+      }, "Сохранить заметку"),
+    );
+    const past = info.notes.filter((n) => !(n.mine && n.date === todayIso));
+    if (past.length) {
+      parts.push(h("div", { class: "notes" }, past.map((n) => h("div", { class: "note-item" },
+        h("div", { class: "note-meta" }, shortDay(n.date) + (state.data.pair ? " · " + (n.mine ? "ты" : n.author) : "")),
+        h("div", null, n.text),
+      ))));
+    }
+    parts.push(h("div", { class: "section-hint", style: "margin-top:14px" }, "Всего выполнено: " + info.totalDone + (isAvoid ? " дн. без срыва" : " раз")));
+    box.replaceChildren(...parts);
   }
 
   // ---------- Telegram back button ----------

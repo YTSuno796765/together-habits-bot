@@ -76,6 +76,40 @@ def habit_done_days(
     return completed_days(checkins, members)
 
 
+def with_freezes(
+    kind: str, done: set[date], frozen: Iterable[date], weekly_target: int | None = None
+) -> set[date]:
+    """Frozen days count as done for day-based to-do habits (not weekly / don't-do)."""
+    if kind != "do" or weekly_target:
+        return set(done)
+    return set(done) | set(frozen)
+
+
+def goal_progress(kind: str, real_done: set[date], streak: int) -> int:
+    """Progress towards a habit goal: days done, or days clean in a row for don't-do habits."""
+    return streak if kind == "avoid" else len(real_done)
+
+
+def freezable_days(
+    days: set[date],
+    frozen: Iterable[date],
+    today: date,
+    schedule: int = EVERY_DAY,
+    start: date | None = None,
+    lookback: int = 7,
+) -> list[date]:
+    """Missed scheduled days in the last `lookback` days (not today) that may be frozen."""
+    frozen_set = set(frozen)
+    result = []
+    for offset in range(1, lookback + 1):
+        day = today - timedelta(days=offset)
+        if start is not None and day < start:
+            break
+        if is_scheduled(schedule, day) and day not in days and day not in frozen_set:
+            result.append(day)
+    return result
+
+
 def current_streak(
     days: set[date], today: date, schedule: int = EVERY_DAY, start: date | None = None
 ) -> int:

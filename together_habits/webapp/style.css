@@ -367,6 +367,33 @@ h1 { font-size: 40px; line-height: 1.05; font-weight: 800; letter-spacing: -0.03
 .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .input[type="date"], .input[type="time"] { color-scheme: dark; }
 
+/* ---------- habit extras: amounts, goals, freezes, notes, archive ---------- */
+.seg.frozen { background: #7dd3fc; }
+.check.plus { font-size: 13px; font-weight: 800; color: var(--mint); border-color: rgba(127, 224, 207, .45); }
+.check.plus.on { color: var(--mint-ink); }
+.goal-line { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+.goal-bar { flex: 1; height: 4px; border-radius: 999px; background: rgba(255, 255, 255, .08); overflow: hidden; }
+.goal-bar i { display: block; height: 100%; background: var(--half); border-radius: inherit; }
+.goal-line small { font-size: 11px; font-weight: 800; color: var(--muted); }
+.amount-box { margin-top: 16px; padding: 14px 16px; }
+.amount-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.amount-btn { min-width: 64px; height: 48px; border-radius: 14px; background: var(--surface-2); font-weight: 800; font-size: 16px; }
+.amount-btn.plus { background: var(--mint); color: var(--mint-ink); }
+.amount-value { font-size: 20px; font-weight: 800; text-align: center; flex: 1; }
+.amount-fields { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+.chips.wrap { flex-wrap: wrap; overflow: visible; margin: 0; padding: 0; }
+.chip.freeze { background: rgba(125, 211, 252, .12); color: #7dd3fc; }
+.chip:disabled { opacity: .4; }
+.input.small { width: 96px; height: 40px; border-radius: 999px; padding: 0 14px; font-size: 15px; }
+.input.note { height: auto; padding: 12px 16px; resize: none; line-height: 1.4; }
+.btn.slim { height: 44px; font-size: 15px; }
+.notes { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.note-item { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 10px 14px; font-size: 15px; line-height: 1.4; }
+.note-meta { color: var(--muted); font-size: 12px; font-weight: 700; margin-bottom: 4px; }
+.detail-actions { margin-top: 22px; }
+.archive-link { display: block; margin: 22px auto 0; color: var(--muted); font-weight: 700; font-size: 14px; padding: 10px 16px; border-radius: 999px; background: var(--surface); }
+.plan.archived { border-left-color: var(--dim); }
+
 /* ---------- section settings ---------- */
 .set-block { padding: 16px 16px 14px; margin-bottom: 12px; }
 .set-title { font-weight: 800; font-size: 16px; }

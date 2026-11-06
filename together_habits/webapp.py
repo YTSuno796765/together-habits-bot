@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo
 from aiohttp import web
 
 from together_habits import logic
-from together_habits.db import Habit, Pair, PairError, Plan, Storage
+from together_habits.db import FREEZES_PER_MONTH, Habit, Pair, PairError, Plan, Storage
 from together_habits.handlers import Handlers
 from together_habits.texts import AVOID_TEMPLATES, KIND_SCOPE, SCOPE_KIND, SCOPES, TEMPLATES
 
@@ -107,6 +107,13 @@ class WebApi:
         app.router.add_post("/api/habits", self._add_habit)
         app.router.add_delete("/api/habits/{habit_id:\\d+}", self._delete_habit)
         app.router.add_post("/api/habits/{habit_id:\\d+}/pin", self._pin_habit)
+        app.router.add_patch("/api/habits/{habit_id:\\d+}", self._edit_habit)
+        app.router.add_get("/api/habits/{habit_id:\\d+}", self._habit_details)
+        app.router.add_post("/api/habits/{habit_id:\\d+}/restore", self._restore_habit)
+        app.router.add_get("/api/archive", self._archive)
+        app.router.add_post("/api/amount", self._amount)
+        app.router.add_post("/api/note", self._note)
+        app.router.add_post("/api/freeze", self._freeze)
         app.router.add_post("/api/order", self._order)
         app.router.add_get("/api/plans", self._plans)
         app.router.add_post("/api/plans", self._add_plan)
@@ -213,7 +220,9 @@ class WebApi:
     def _habit_payload(self, habit: Habit, user_id: int, pair: Pair | None, today: date) -> dict[str, Any]:
         checkins = self.db.checkins(habit.id)
         members = pair.members if pair else frozenset({user_id})
-        done_days = logic.habit_done_days(habit.kind, checkins, members, today, habit.created)
+        real_done = logic.habit_done_days(habit.kind, checkins, members, today, habit.created)
+        frozen = set(self.db.freezes(habit.id))
+        done_days = logic.with_freezes(habit.kind, real_done, frozen, habit.weekly_target)
         partner_id = pair.other(user_id) if pair else None
         today_users = checkins.get(today, set())
         my_days = {day for day, users in checkins.items() if user_id in users}
@@ -229,7 +238,14 @@ class WebApi:
                 status = "missed"  # slipped today
             if not habit.is_avoid and pair and status in {"missed", "today"} and checkins.get(day):
                 status = "half"  # only one of the two checked in
+            if day in frozen and day not in real_done:
+                status = "frozen"
             week.append({"date": day.isoformat(), "status": status})
+
+        streak = logic.habit_streak(
+            habit.kind, done_days, today, habit.schedule, habit.created, habit.weekly_target
+        )
+        amounts_today = self.db.amounts(habit.id).get(today, {}) if habit.is_amount else {}
 
         if habit.is_avoid:  # a mark means a slip
             me_done = not me_marked
@@ -254,10 +270,16 @@ class WebApi:
             "meDone": me_done,
             "partnerDone": partner_done,
             "week": week,
-            "streak": logic.habit_streak(
-                habit.kind, done_days, today, habit.schedule, habit.created, habit.weekly_target
-            ),
+            "streak": streak,
             "best": logic.best_streak(done_days, habit.schedule, habit.created, habit.weekly_target),
+            "goalDays": habit.goal_days,
+            "goalProgress": logic.goal_progress(habit.kind, real_done, streak) if habit.goal_days else None,
+            "targetAmount": habit.target_amount,
+            "unit": habit.unit,
+            "step": habit.step,
+            "myAmount": amounts_today.get(user_id, 0) if habit.is_amount else None,
+            "partnerAmount": amounts_today.get(partner_id, 0) if habit.is_amount and partner_id else None,
+            "remindAt": habit.remind_at,
         }
 
     # ---- endpoints -------------------------------------------------------------
@@ -296,6 +318,9 @@ class WebApi:
         items = [self._habit_payload(h, user_id, pair, today) for h in habits]
         due = [item for item in items if item["dueToday"] and item["kind"] == "do"]
         payload["habits"] = items
+        payload["archivedCount"] = len(
+            self.db.list_archived(owner_id=user_id) if pair is None else self.db.list_archived(pair_id=pair.id)
+        )
         payload["progress"] = {"done": sum(1 for i in due if i["meDone"]), "total": len(due)}
 
         if scope == "c" and pair is not None:
@@ -316,8 +341,9 @@ class WebApi:
             checkins = self.db.checkins(habit.id)
             if not habit.is_avoid:  # slips are not shared activity
                 all_checkins.append(checkins)
+            real = logic.habit_done_days(habit.kind, checkins, members, today, habit.created)
             series.append(
-                (habit, logic.habit_done_days(habit.kind, checkins, members, today, habit.created))
+                (habit, logic.with_freezes(habit.kind, real, self.db.freezes(habit.id), habit.weekly_target))
             )
 
         def rate(window: int) -> float | None:
@@ -413,15 +439,74 @@ class WebApi:
             payload["pair"] = pair_block
         return web.json_response(payload)
 
+    def _day_param(self, value: Any) -> date:
+        """Only today or yesterday may be changed ("забыл отметить вчера")."""
+        today = self.today()
+        if value in (None, "", "today"):
+            return today
+        if value == "yesterday":
+            return today - timedelta(days=1)
+        try:
+            day = date.fromisoformat(str(value))
+        except ValueError as exc:
+            raise ApiError("Некорректная дата") from exc
+        if day not in (today, today - timedelta(days=1)):
+            raise ApiError("Отмечать можно только сегодня и вчера")
+        return day
+
     async def _checkin(self, request: web.Request) -> web.Response:
         user_id = request["user_id"]
         data = await self._json(request)
         habit = self._owned_habit(user_id, data.get("habitId"))
-        today = self.today()
-        checked = self.db.toggle_checkin(habit.id, user_id, today)
-        if checked and habit.pair_id is not None and self.bot is not None:
-            await self.handlers.notify_checkin(self.bot, habit, user_id, today)
+        day = self._day_param(data.get("date"))
+        if habit.is_amount:
+            raise ApiError("Для этой привычки добавляй количество")
+        checked = self.db.toggle_checkin(habit.id, user_id, day)
+        if checked and day == self.today() and habit.pair_id is not None and self.bot is not None:
+            await self.handlers.notify_checkin(self.bot, habit, user_id, day)
         return web.json_response({"checked": checked})
+
+    async def _amount(self, request: web.Request) -> web.Response:
+        """Quantitative habits: add `delta` (e.g. one glass) or set an exact `value`."""
+        user_id = request["user_id"]
+        data = await self._json(request)
+        habit = self._owned_habit(user_id, data.get("habitId"))
+        if not habit.is_amount:
+            raise ApiError("Это не количественная привычка")
+        day = self._day_param(data.get("date"))
+        current = self.db.amounts(habit.id).get(day, {}).get(user_id, 0)
+        value, delta = data.get("value"), data.get("delta")
+        for item in (value, delta):
+            if item is not None and (not isinstance(item, int) or isinstance(item, bool)):
+                raise ApiError("Количество — целое число")
+        new_value = value if value is not None else current + (delta if delta is not None else habit.step or 1)
+        was_met = current >= (habit.target_amount or 0)
+        met = self.db.set_amount(habit, user_id, day, new_value)
+        if met and not was_met and day == self.today() and habit.pair_id is not None and self.bot is not None:
+            await self.handlers.notify_checkin(self.bot, habit, user_id, day)
+        stored = self.db.amounts(habit.id).get(day, {}).get(user_id, 0)
+        return web.json_response({"value": stored, "met": met})
+
+    def _habit_options(self, data: dict[str, Any], *, partial: bool) -> dict[str, Any]:
+        """Map API fields to storage keyword arguments (only those present when partial)."""
+        mapping = {
+            "weeklyTarget": "weekly_target",
+            "goalDays": "goal_days",
+            "targetAmount": "target_amount",
+            "unit": "unit",
+            "step": "step",
+            "remindAt": "remind_at",
+        }
+        options: dict[str, Any] = {}
+        for api_key, db_key in mapping.items():
+            if api_key in data:
+                value = data[api_key]
+                if value == "":
+                    value = None
+                options[db_key] = value
+            elif not partial:
+                options[db_key] = None
+        return options
 
     async def _add_habit(self, request: web.Request) -> web.Response:
         user_id = request["user_id"]
@@ -432,13 +517,10 @@ class WebApi:
         kind = data.get("kind", "do")
         if kind not in ("do", "avoid"):
             raise ApiError("Неизвестный тип привычки")
-        if not isinstance(schedule, int):
+        if not isinstance(schedule, int) or isinstance(schedule, bool):
             raise ApiError("Некорректное расписание")
-        weekly_target = data.get("weeklyTarget")
-        if weekly_target is not None and (
-            not isinstance(weekly_target, int) or isinstance(weekly_target, bool)
-            or not 1 <= weekly_target <= 6 or kind != "do"
-        ):
+        options = self._habit_options(data, partial=False)
+        if options["weekly_target"] is not None and kind != "do":
             raise ApiError("Раз в неделю — от 1 до 6, только для привычек «Делать»")
         try:
             habit = self.db.add_habit(
@@ -449,15 +531,154 @@ class WebApi:
                 schedule=schedule,
                 created=self.today(),
                 kind=kind,
-                weekly_target=weekly_target,
+                **options,
             )
         except ValueError as exc:
-            raise ApiError("Проверь название и дни недели (максимум 15 привычек)") from exc
+            raise ApiError(
+                "Проверь название, дни и настройки (раз в неделю 1–6, максимум 15 привычек)"
+            ) from exc
         return web.json_response({"id": habit.id})
 
-    async def _delete_habit(self, request: web.Request) -> web.Response:
+    async def _edit_habit(self, request: web.Request) -> web.Response:
         habit = self._owned_habit(request["user_id"], request.match_info["habit_id"])
-        self.db.archive_habit(habit.id)
+        data = await self._json(request)
+        schedule = data.get("schedule")
+        if schedule is not None and (not isinstance(schedule, int) or isinstance(schedule, bool)):
+            raise ApiError("Некорректное расписание")
+        title, emoji = data.get("title"), data.get("emoji")
+        try:
+            self.db.update_habit(
+                habit.id,
+                title=None if title is None else str(title),
+                emoji=None if emoji is None else str(emoji),
+                schedule=schedule,
+                **self._habit_options(data, partial=True),
+            )
+        except ValueError as exc:
+            raise ApiError("Проверь название, дни и настройки привычки") from exc
+        return web.json_response({"ok": True})
+
+    async def _delete_habit(self, request: web.Request) -> web.Response:
+        """Archive by default (history kept); `?forever=1` deletes an archived habit."""
+        user_id = request["user_id"]
+        habit_id = request.match_info["habit_id"]
+        if request.query.get("forever") == "1":
+            habit = self.db.get_habit(int(habit_id), include_archived=True)
+            if habit is None or not self.db.can_access(habit, user_id):
+                raise ApiError("Привычка не найдена", 404)
+            self.db.delete_habit_forever(habit.id)
+        else:
+            habit = self._owned_habit(user_id, habit_id)
+            self.db.archive_habit(habit.id)
+        return web.json_response({"ok": True})
+
+    async def _restore_habit(self, request: web.Request) -> web.Response:
+        user_id = request["user_id"]
+        habit = self.db.get_habit(int(request.match_info["habit_id"]), include_archived=True)
+        if habit is None or not self.db.can_access(habit, user_id):
+            raise ApiError("Привычка не найдена", 404)
+        try:
+            self.db.restore_habit(habit.id)
+        except ValueError as exc:
+            raise ApiError("Уже 15 привычек — сначала убери одну") from exc
+        return web.json_response({"ok": True})
+
+    async def _archive(self, request: web.Request) -> web.Response:
+        user_id = request["user_id"]
+        scope = self._scope(request.query.get("scope", "p"))
+        pair, _ = self._active_view(user_id, scope)
+        habits = (
+            self.db.list_archived(owner_id=user_id) if pair is None else self.db.list_archived(pair_id=pair.id)
+        )
+        members = pair.members if pair else frozenset({user_id})
+        today = self.today()
+        items = []
+        for h in habits:
+            done = logic.habit_done_days(h.kind, self.db.checkins(h.id), members, today, h.created)
+            items.append(
+                {
+                    "id": h.id,
+                    "title": h.title,
+                    "emoji": h.emoji,
+                    "kind": h.kind,
+                    "doneDays": len(done),
+                    "best": logic.best_streak(done, h.schedule, h.created, h.weekly_target),
+                }
+            )
+        return web.json_response({"habits": items})
+
+    async def _habit_details(self, request: web.Request) -> web.Response:
+        """Notes, freezes and (for shared habits) reactions of one habit."""
+        user_id = request["user_id"]
+        habit = self._owned_habit(user_id, request.match_info["habit_id"])
+        today = self.today()
+        pair = self.db.get_pair_by_id(habit.pair_id) if habit.pair_id else None
+        members = pair.members if pair else frozenset({user_id})
+        checkins = self.db.checkins(habit.id)
+        real = logic.habit_done_days(habit.kind, checkins, members, today, habit.created)
+        frozen = self.db.freezes(habit.id)
+        can_freeze = habit.kind == "do" and not habit.weekly_target
+        freezable = (
+            logic.freezable_days(real, frozen, today, habit.schedule, habit.created) if can_freeze else []
+        )
+        yesterday = today - timedelta(days=1)
+        my_amounts = self.db.amounts(habit.id) if habit.is_amount else {}
+        return web.json_response(
+            {
+                "notes": [
+                    {"date": d.isoformat(), "author": self.db.user_name(uid), "mine": uid == user_id, "text": t}
+                    for d, uid, t in self.db.notes(habit.id)
+                ],
+                "freezesLeft": max(0, FREEZES_PER_MONTH - self.db.freezes_used(user_id, today)),
+                "freezable": [d.isoformat() for d in freezable] if can_freeze else [],
+                "frozen": [
+                    {"date": d.isoformat(), "mine": uid == user_id}
+                    for d, uid in sorted(frozen.items(), reverse=True)
+                    if d >= today - timedelta(days=30)
+                ],
+                "yesterdayMarked": user_id in checkins.get(yesterday, set()),
+                "yesterdayAmount": my_amounts.get(yesterday, {}).get(user_id, 0) if habit.is_amount else None,
+                "totalDone": len(real),
+            }
+        )
+
+    async def _note(self, request: web.Request) -> web.Response:
+        user_id = request["user_id"]
+        data = await self._json(request)
+        habit = self._owned_habit(user_id, data.get("habitId"))
+        text = data.get("text", "")
+        if not isinstance(text, str):
+            raise ApiError("Некорректная заметка")
+        self.db.set_note(habit.id, user_id, self._day_param(data.get("date")), text)
+        return web.json_response({"ok": True})
+
+    async def _freeze(self, request: web.Request) -> web.Response:
+        user_id = request["user_id"]
+        data = await self._json(request)
+        habit = self._owned_habit(user_id, data.get("habitId"))
+        try:
+            day = date.fromisoformat(str(data.get("date", "")))
+        except ValueError as exc:
+            raise ApiError("Некорректная дата") from exc
+        if data.get("remove") is True:
+            if not self.db.remove_freeze(habit.id, user_id, day):
+                raise ApiError("Эту заморозку ставил не ты", 404)
+            return web.json_response({"ok": True})
+        today = self.today()
+        pair = self.db.get_pair_by_id(habit.pair_id) if habit.pair_id else None
+        members = pair.members if pair else frozenset({user_id})
+        real = logic.habit_done_days(habit.kind, self.db.checkins(habit.id), members, today, habit.created)
+        allowed = (
+            logic.freezable_days(real, self.db.freezes(habit.id), today, habit.schedule, habit.created)
+            if habit.kind == "do" and not habit.weekly_target
+            else []
+        )
+        if day not in allowed:
+            raise ApiError("Заморозить можно пропуск за последние 7 дней")
+        try:
+            self.db.add_freeze(habit.id, user_id, day)
+        except ValueError as exc:
+            raise ApiError(f"Заморозки на этот месяц закончились ({FREEZES_PER_MONTH} в месяц)") from exc
         return web.json_response({"ok": True})
 
     async def _pin_habit(self, request: web.Request) -> web.Response:

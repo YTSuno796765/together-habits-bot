@@ -441,7 +441,13 @@ class Handlers:
             return
         scope = self._habit_scope(habit)
         today = self.today()
-        checked = self.db.toggle_checkin(habit_id, user_id, today)
+        if habit.is_amount:
+            # In the text menu a tap fills the whole daily amount (or clears it).
+            current = self.db.amounts(habit.id).get(today, {}).get(user_id, 0)
+            target = habit.target_amount or 1
+            checked = self.db.set_amount(habit, user_id, today, 0 if current >= target else target)
+        else:
+            checked = self.db.toggle_checkin(habit_id, user_id, today)
         toast = "✅ Отмечено" if checked else "Отметка снята"
         if habit.is_avoid:
             toast = "💥 Срыв отмечен. Начнём заново!" if checked else "Срыв отменён"
@@ -498,7 +504,12 @@ class Handlers:
             checkins = self.db.checkins(habit.id)
             if not habit.is_avoid:  # slips are not shared activity
                 all_checkins.append(checkins)
-            days = logic.habit_done_days(habit.kind, checkins, members, today, habit.created)
+            days = logic.with_freezes(
+                habit.kind,
+                logic.habit_done_days(habit.kind, checkins, members, today, habit.created),
+                self.db.freezes(habit.id),
+                habit.weekly_target,
+            )
             blocks.append(
                 f"{'🚫 ' if habit.is_avoid else ''}{habit.emoji} <b>{escape(habit.title)}</b>\n"
                 f"{logic.week_marks(days, today)}\n"
