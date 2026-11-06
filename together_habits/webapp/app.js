@@ -128,7 +128,17 @@
       state.sections = state.plans.sections;
       return;
     }
-    state.data = await api("/api/state?scope=" + state.scope);
+    if (state.scope === "p") {
+      const [data, tasks, goals, focus] = await Promise.all([
+        api("/api/state?scope=p"), api("/api/tasks"), api("/api/goals"), api("/api/focus"),
+      ]);
+      state.data = data;
+      state.tasks = tasks;
+      state.goals = goals.goals;
+      setFocus(focus);
+    } else {
+      state.data = await api("/api/state?scope=" + state.scope);
+    }
     state.sections = state.data.sections;
     if (state.sections[state.scope] && state.sections[state.scope].hidden) {
       // The section was hidden (maybe on another device) — fall back to personal.
@@ -212,7 +222,9 @@
     } else {
       page.push(renderProgress(d));
       if (state.scope === "c") page.push(renderMood(d));
+      if (state.scope === "p") page.push(renderTasks(), renderFocusCard());
       page.push(...renderHabitSections(d));
+      if (state.scope === "p") page.push(...renderGoals());
     }
     app.replaceChildren(h("div", { class: "fade-in" }, page));
   }
@@ -638,6 +650,315 @@
     });
   }
 
+  // ---------- year heatmap ----------
+  function heatmap(cells) {
+    const weeks = [];
+    for (let i = 0; i < cells.length; i += 7) weeks.push(cells.slice(i, i + 7));
+    const done = cells.filter((c) => c.level > 0).length;
+    const scroller = h("div", { class: "heat-scroll" },
+      h("div", { class: "heat" }, weeks.map((week) => h("div", { class: "heat-col" },
+        week.map((c) => h("span", { class: "hc l" + c.level, title: c.date }))))));
+    requestAnimationFrame(() => { scroller.scrollLeft = scroller.scrollWidth; });
+    return h("div", { class: "panel" },
+      h("div", { class: "chart-hint" }, "Дней с выполнением: ", h("b", null, String(done)), " за год"),
+      scroller,
+      h("div", { class: "heat-legend" }, "меньше", [0, 1, 2, 3, 4].map((l) => h("span", { class: "hc l" + l })), "больше"),
+    );
+  }
+
+  // ---------- top tasks of the day ----------
+  function renderTasks() {
+    const T = state.tasks || { tasks: [], carryable: 0 };
+    const input = h("input", {
+      class: "input task-input", maxlength: "80", placeholder: T.tasks.length >= 5 ? "Максимум 5 задач" : "Добавить главную задачу…",
+      disabled: T.tasks.length >= 5, enterkeyhint: "done",
+      onkeydown: (e) => { if (e.key === "Enter") addTask(e.target.value); },
+    });
+    const done = T.tasks.filter((t) => t.done).length;
+    return h("div", { class: "panel tasks", style: "margin-top:14px" },
+      h("div", { class: "row-title tasks-head" },
+        h("span", null, "🎯 Главное сегодня"),
+        T.tasks.length ? h("span", { class: "muted" }, done + "/" + T.tasks.length) : null),
+      T.tasks.map((t) => h("div", { class: "task" + (t.done ? " done" : "") },
+        h("button", { class: "task-check", "aria-label": t.done ? "Снять" : "Готово", onclick: () => taskAction(t.id, "toggle") }, t.done ? icon("check") : null),
+        h("span", { class: "task-title" }, t.title),
+        h("button", { class: "task-del", "aria-label": "Удалить", onclick: () => taskAction(t.id, "delete") }, "×"),
+      )),
+      T.tasks.length < 5 ? h("div", { class: "task-add" }, input, h("button", { class: "task-plus", "aria-label": "Добавить", onclick: () => addTask(input.value) }, icon("plus"))) : null,
+      T.carryable && T.tasks.length < 5 ? h("button", { class: "mini-add", style: "margin-top:10px", onclick: () => addTask(null, true) }, "↪ Перенести невыполненные со вчера (" + T.carryable + ")") : null,
+      !T.tasks.length ? h("div", { class: "section-hint", style: "margin:8px 0 0" }, "1–3 задачи, которые сделают день успешным. В полночь список обнуляется.") : null,
+    );
+  }
+
+  async function addTask(title, carry) {
+    if (!carry && !(title || "").trim()) return;
+    try {
+      state.tasks = await api("/api/tasks", { method: "POST", body: carry ? { carry: true } : { title } });
+      haptic("light");
+      render();
+      const input = document.querySelector(".task-input");
+      if (input && !carry) input.focus();
+    } catch (err) {
+      toast(err.message);
+    }
+  }
+
+  async function taskAction(id, action) {
+    try {
+      state.tasks = await api("/api/tasks/" + id + (action === "toggle" ? "/toggle" : ""), { method: action === "toggle" ? "POST" : "DELETE", body: action === "toggle" ? {} : undefined });
+      const t = state.tasks.tasks.find((x) => x.id === id);
+      haptic(t && t.done ? "success" : "light");
+      if (t && t.done && state.tasks.tasks.every((x) => x.done)) toast("Все главные задачи сделаны 🎉");
+      render();
+    } catch (err) {
+      toast(err.message);
+    }
+  }
+
+  // ---------- focus (pomodoro) ----------
+  let focusTicker = null;
+  function setFocus(focus) {
+    state.focus = focus;
+    state.focusOffset = new Date(focus.now).getTime() - Date.now();
+  }
+  function focusRemaining() {
+    const a = state.focus && state.focus.active;
+    if (!a) return null;
+    return Math.max(0, Math.round((new Date(a.ends_at).getTime() - (Date.now() + state.focusOffset)) / 1000));
+  }
+  const mmss = (sec) => String(Math.floor(sec / 60)).padStart(2, "0") + ":" + String(sec % 60).padStart(2, "0");
+
+  function renderFocusCard() {
+    const F = state.focus || {};
+    const left = focusRemaining();
+    let label = "Помодоро-таймер";
+    if (left !== null) {
+      const end = new Date(new Date(F.active.ends_at).getTime() - state.focusOffset);
+      label = left > 0 ? "Идёт фокус до " + String(end.getHours()).padStart(2, "0") + ":" + String(end.getMinutes()).padStart(2, "0") : "Фокус завершён — засчитай";
+    }
+    return h("button", { class: "panel focus-card" + (left !== null ? " running" : ""), onclick: openFocusSheet },
+      h("span", { class: "focus-icon" }, "⏱"),
+      h("span", { class: "focus-body" },
+        h("span", { class: "focus-title" }, label),
+        h("span", { class: "focus-meta" }, "Сегодня " + (F.todayMinutes || 0) + " мин · за неделю " + (Math.round((F.weekMinutes || 0) / 6) / 10).toString().replace(".", ",") + " ч")),
+      h("span", { class: "focus-go" }, left === null ? "Старт" : "Открыть"),
+    );
+  }
+
+  function openFocusSheet() {
+    haptic("light");
+    const form = { minutes: 25, habitId: null };
+    const doHabits = (state.data.habits || []).filter((x) => x.kind !== "avoid");
+    let breakEnds = null;
+    openSheet(() => {
+      const box = h("div", null);
+      function ring(fraction, text, sub) {
+        const r = 88, c = 2 * Math.PI * r;
+        const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        svg.setAttribute("viewBox", "0 0 200 200");
+        svg.setAttribute("class", "ring");
+        svg.innerHTML = '<circle cx="100" cy="100" r="88" class="ring-bg"/><circle cx="100" cy="100" r="88" class="ring-fg" stroke-dasharray="' + c + '" stroke-dashoffset="' + (c * (1 - fraction)) + '"/>';
+        return h("div", { class: "ring-wrap" }, svg, h("div", { class: "ring-text" }, h("b", null, text), h("span", null, sub)));
+      }
+      function paint() {
+        const a = state.focus.active;
+        const left = focusRemaining();
+        if (breakEnds) {
+          const b = Math.max(0, Math.round((breakEnds - Date.now()) / 1000));
+          box.replaceChildren(ring(b / 300, mmss(b), "перерыв ☕"),
+            h("button", { class: "btn ghost", onclick: () => { breakEnds = null; paint(); } }, b ? "Закончить перерыв" : "Готово"));
+          if (!b) { breakEnds = null; haptic("success"); }
+          return;
+        }
+        if (a) {
+          const total = a.minutes * 60;
+          box.replaceChildren(
+            ring(left / total, mmss(left), a.habit ? "→ " + a.habit : "фокус"),
+            left > 0
+              ? h("button", { class: "btn danger", onclick: () => finishFocus(a.id, "cancel") }, "Прервать")
+              : h("button", { class: "btn", onclick: () => finishFocus(a.id, "complete") }, "✅ Засчитать " + a.minutes + " мин"),
+            h("div", { class: "section-hint", style: "margin-top:12px;text-align:center" }, "Можно закрыть приложение — бот напишет, когда время выйдет."),
+          );
+          if (left === 0 && !box.dataset.buzzed) { box.dataset.buzzed = "1"; haptic("success"); }
+          return;
+        }
+        const chips = [15, 25, 45, 60].map((m) => h("button", { class: "day" + (form.minutes === m ? " on" : ""), onclick: () => { form.minutes = m; paint(); haptic("select"); } }, m + " мин"));
+        const select = h("select", { class: "input select", onchange: (e) => { form.habitId = e.target.value ? Number(e.target.value) : null; } },
+          h("option", { value: "" }, "Без привычки"),
+          doHabits.map((x) => h("option", { value: String(x.id) }, x.emoji + " " + x.title)));
+        select.value = form.habitId ? String(form.habitId) : "";
+        box.replaceChildren(
+          ring(1, form.minutes + ":00", "готов к фокусу"),
+          h("div", { class: "days four-col" }, chips),
+          h("div", { class: "field-label" }, "Засчитать в привычку"),
+          select,
+          h("button", { class: "btn", onclick: startFocus }, "▶ Начать"),
+          h("div", { class: "section-hint", style: "margin-top:12px" }, "Сегодня: " + state.focus.todayMinutes + " мин · " + state.focus.todaySessions + " сессий"),
+        );
+      }
+      async function startFocus() {
+        try {
+          setFocus(await api("/api/focus/start", { method: "POST", body: { minutes: form.minutes, habitId: form.habitId } }));
+          haptic("success");
+          paint();
+        } catch (err) {
+          toast(err.message);
+        }
+      }
+      async function finishFocus(id, action) {
+        if (action === "cancel" && !(await confirmDialog("Прервать фокус? Время не засчитается."))) return;
+        try {
+          const res = await api("/api/focus/" + id + "/" + action, { method: "POST", body: {} });
+          setFocus(res);
+          if (action === "complete") {
+            toast(res.marked ? "Засчитано: " + res.marked + " ✅" : "Сессия засчитана ✅");
+            breakEnds = Date.now() + 5 * 60 * 1000;
+          }
+          paint();
+          loadState().then(() => { if (!closeCurrentSheet) render(); });
+        } catch (err) {
+          toast(err.message);
+        }
+      }
+      paint();
+      clearInterval(focusTicker);
+      focusTicker = setInterval(() => {
+        if (!document.body.contains(box)) { clearInterval(focusTicker); render(); return; }
+        if (state.focus.active || breakEnds) paint();
+      }, 1000);
+      return h("div", null, h("h2", null, "⏱ Фокус"), box);
+    });
+  }
+
+  // ---------- goals ----------
+  function renderGoals() {
+    const goals = state.goals || [];
+    const out = [h("div", { class: "section-title row-title" },
+      h("span", null, "🚀 Цели"),
+      h("button", { class: "mini-add", onclick: openGoalSheet }, "+ добавить"))];
+    if (!goals.length) {
+      out.push(h("button", { class: "avoid-empty goal-empty", onclick: openGoalSheet }, "🚀 Поставь цель на месяц или квартал — например, «Похудеть на 5 кг» — и привяжи к ней привычки."));
+      return out;
+    }
+    out.push(h("div", { class: "plan-list" }, goals.map((g) => h("div", { class: "panel goal" + (g.done ? " done" : ""), role: "button", tabindex: "0", onclick: () => openGoalDetail(g) },
+      h("div", { class: "ch-head" },
+        h("div", { class: "plan-icon" }, g.emoji),
+        h("div", { class: "plan-body" },
+          h("div", { class: "plan-title" }, (g.done ? "🏆 " : "") + g.title),
+          h("div", { class: "plan-meta" }, [
+            g.target ? fmtNum(g.current) + " / " + fmtNum(g.target) + (g.unit ? " " + g.unit : "") : "по привычкам",
+            g.daysLeft != null ? (g.daysLeft >= 0 ? "осталось " + g.daysLeft + " дн." : "срок прошёл") : null,
+          ].filter(Boolean).join(" · ")),
+        ),
+        h("div", { class: "goal-pct" }, Math.round(g.progress * 100) + "%"),
+      ),
+      h("div", { class: "goal-bar ch-progress" }, h("i", { style: "width:" + Math.round(g.progress * 100) + "%" })),
+      g.habits.length ? h("div", { class: "goal-habits" }, g.habits.map((x) => h("span", { class: "gh" }, x.emoji + " " + (x.rate == null ? "—" : Math.round(x.rate * 100) + "%")))) : null,
+    ))));
+    return out;
+  }
+  const fmtNum = (n) => (Number.isInteger(n) ? String(n) : String(Math.round(n * 10) / 10)).replace(".", ",");
+
+  function habitPicker(selected) {
+    const all = (state.data.habits || []);
+    const chosen = new Set(selected || []);
+    const chips = all.map((x) => {
+      const b = h("button", { class: "chip" + (chosen.has(x.id) ? " on" : ""), onclick: () => { chosen.has(x.id) ? chosen.delete(x.id) : chosen.add(x.id); b.classList.toggle("on", chosen.has(x.id)); haptic("select"); } }, x.emoji + " " + x.title);
+      return b;
+    });
+    return { el: h("div", { class: "chips wrap" }, chips.length ? chips : h("span", { class: "section-hint" }, "Пока нет личных привычек")), ids: () => Array.from(chosen) };
+  }
+
+  function openGoalSheet() {
+    haptic("light");
+    const form = { title: "", emoji: "🚀", target: "", unit: "", deadline: "" };
+    const IDEAS = [["🏃", "Похудеть", "5", "кг"], ["📚", "Прочитать книги", "4", "книг"], ["💰", "Накопить", "50000", "₽"], ["🇬🇧", "Выучить слова", "500", "слов"], ["🏋️", "Режим тренировок", "", ""]];
+    openSheet(() => {
+      const submit = h("button", { class: "btn", disabled: true, onclick: () => save() }, "Поставить цель");
+      const title = h("input", { class: "input", maxlength: "60", placeholder: "Например, «Похудеть»", oninput: (e) => { form.title = e.target.value; submit.disabled = !form.title.trim(); } });
+      const target = h("input", { class: "input", type: "number", inputmode: "decimal", placeholder: "Сколько (необяз.)", oninput: (e) => { form.target = e.target.value; } });
+      const unit = h("input", { class: "input", maxlength: "12", placeholder: "кг, книг, ₽", oninput: (e) => { form.unit = e.target.value; } });
+      const quarter = new Date(); quarter.setMonth(quarter.getMonth() + 3);
+      const month = new Date(); month.setMonth(month.getMonth() + 1);
+      const deadline = h("input", { class: "input", type: "date", min: state.data.today, onchange: (e) => { form.deadline = e.target.value; } });
+      const picker = habitPicker([]);
+      async function save() {
+        submit.disabled = true;
+        try {
+          const res = await api("/api/goals", { method: "POST", body: { title: form.title, emoji: form.emoji, target: form.target ? Number(form.target.replace(",", ".")) : null, unit: form.unit, deadline: form.deadline || null, habitIds: picker.ids() } });
+          state.goals = res.goals;
+          haptic("success");
+          closeSheet();
+          render();
+          toast("Цель поставлена 🚀");
+        } catch (err) {
+          submit.disabled = false;
+          toast(err.message);
+        }
+      }
+      return h("div", null,
+        h("h2", null, "Новая цель"),
+        h("div", { class: "field-label" }, "Идеи"),
+        h("div", { class: "chips" }, IDEAS.map(([em, t, n, u]) => h("button", { class: "chip", onclick: () => { form.title = t; title.value = t; form.emoji = em; form.target = n; target.value = n; form.unit = u; unit.value = u; submit.disabled = false; } }, em + " " + t))),
+        h("div", { class: "field-label" }, "Цель"), title,
+        h("div", { class: "two-col" }, h("div", null, h("div", { class: "field-label" }, "Число"), target), h("div", null, h("div", { class: "field-label" }, "Единица"), unit)),
+        h("div", { class: "field-label" }, "Срок"),
+        h("div", { class: "chips wrap", style: "margin-bottom:8px" },
+          h("button", { class: "chip", onclick: () => { form.deadline = isoOf(month); deadline.value = form.deadline; } }, "Месяц"),
+          h("button", { class: "chip", onclick: () => { form.deadline = isoOf(quarter); deadline.value = form.deadline; } }, "Квартал")),
+        deadline,
+        h("div", { class: "field-label" }, "Привычки, которые ведут к цели"),
+        picker.el,
+        h("div", { class: "section-hint", style: "margin-top:10px" }, "Если число не указано, прогресс цели — это средний % выполнения привязанных привычек."),
+        submit,
+      );
+    });
+  }
+
+  function openGoalDetail(g) {
+    haptic("light");
+    openSheet(() => {
+      const value = h("input", { class: "input", type: "number", inputmode: "decimal", value: String(g.current) });
+      const picker = habitPicker(g.habits.map((x) => x.id));
+      const patch = async (body, message) => {
+        try {
+          state.goals = (await api("/api/goals/" + g.id, { method: "PATCH", body })).goals;
+          haptic("success");
+          closeSheet();
+          render();
+          toast(message);
+        } catch (err) {
+          toast(err.message);
+        }
+      };
+      return h("div", null,
+        h("div", { class: "detail-head" }, h("div", { class: "habit-icon" }, g.emoji),
+          h("div", null, h("h2", null, g.title), h("div", { class: "habit-meta" }, g.deadline ? "до " + dayTitle(g.deadline) : "без срока"))),
+        h("div", { class: "tiles two" }, tile(Math.round(g.progress * 100) + "%", "прогресс", true), tile(g.daysLeft != null ? String(Math.max(0, g.daysLeft)) : "∞", "дней осталось")),
+        g.target ? [h("div", { class: "field-label" }, "Сейчас (" + fmtNum(g.target) + (g.unit ? " " + g.unit : "") + " — цель)"), value,
+          h("button", { class: "btn", onclick: () => patch({ current: Number(String(value.value).replace(",", ".")) || 0 }, "Прогресс обновлён") }, "Обновить прогресс")] : null,
+        h("div", { class: "field-label" }, "Привычки"),
+        picker.el,
+        h("button", { class: "btn ghost", onclick: () => patch({ habitIds: picker.ids() }, "Привычки обновлены") }, "Сохранить привычки"),
+        h("button", { class: "btn ghost", onclick: () => patch({ done: !g.done }, g.done ? "Цель снова в работе" : "Цель достигнута 🏆") }, g.done ? "Вернуть в работу" : "🏆 Цель достигнута"),
+        h("button", {
+          class: "btn danger",
+          onclick: async () => {
+            if (!(await confirmDialog("Удалить цель «" + g.title + "»?"))) return;
+            try {
+              state.goals = (await api("/api/goals/" + g.id, { method: "DELETE" })).goals;
+              closeSheet();
+              render();
+              toast("Цель удалена");
+            } catch (err) {
+              toast(err.message);
+            }
+          },
+        }, "Удалить цель"),
+      );
+    });
+  }
+
   function renderProgress(d) {
     const { done, total } = d.progress;
     const width = total ? Math.round((done / total) * 100) : 0;
@@ -830,6 +1151,19 @@
     if (s.pair && s.pair.moodWeek) {
       page.push(h("div", { class: "section-title" }, "Настроение за неделю"), moodWeek(s.pair));
     }
+    if (s.moodEffects && s.moodEffects.length) {
+      page.push(h("div", { class: "section-title" }, "Настроение и привычки"),
+        h("div", { class: "panel hlist" },
+          h("div", { class: "section-hint", style: "margin:0 0 6px" }, "Среднее настроение в дни с привычкой и без неё (за 90 дней)"),
+          s.moodEffects.map((e) => h("div", { class: "item" },
+            h("div", { class: "ic" }, e.emoji),
+            h("div", { class: "body" },
+              h("div", { class: "name" }, (e.kind === "avoid" ? "🚫 " : "") + e.title),
+              h("div", { class: "sub" }, "дней с ней: " + e.with + " · без: " + e.without)),
+            h("div", { class: "pct " + (e.diff > 0 ? "up" : e.diff < 0 ? "down" : "") }, (e.diff > 0 ? "+" : "") + e.diff.toFixed(1)),
+          ))));
+    }
+    if (s.year) page.push(h("div", { class: "section-title" }, "Год"), heatmap(s.year));
 
     page.push(
       h("div", { class: "section-title" }, "Привычки за 30 дней"),

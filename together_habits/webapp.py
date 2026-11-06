@@ -117,6 +117,17 @@ class WebApi:
         app.router.add_post("/api/note", self._note)
         app.router.add_post("/api/freeze", self._freeze)
         app.router.add_post("/api/nudge", self._nudge)
+        app.router.add_get("/api/focus", self._focus)
+        app.router.add_post("/api/focus/start", self._focus_start)
+        app.router.add_post("/api/focus/{session_id:\\d+}/{action:complete|cancel}", self._focus_finish)
+        app.router.add_get("/api/tasks", self._tasks)
+        app.router.add_post("/api/tasks", self._add_task)
+        app.router.add_post("/api/tasks/{task_id:\\d+}/toggle", self._toggle_task)
+        app.router.add_delete("/api/tasks/{task_id:\\d+}", self._delete_task)
+        app.router.add_get("/api/goals", self._goals)
+        app.router.add_post("/api/goals", self._add_goal)
+        app.router.add_patch("/api/goals/{goal_id:\\d+}", self._edit_goal)
+        app.router.add_delete("/api/goals/{goal_id:\\d+}", self._delete_goal)
         app.router.add_get("/api/notifications", self._notifications)
         app.router.add_post("/api/notifications", self._update_notifications)
         app.router.add_post("/api/export", self._export)
@@ -435,6 +446,17 @@ class WebApi:
             "pair": None,
         }
 
+        # Year heatmap: 53 weeks, Monday-aligned, oldest first.
+        first_monday = logic.week_start(today) - timedelta(weeks=52)
+        year = []
+        cursor = first_monday
+        while cursor <= today:
+            done_count, due_count = day_value(cursor)
+            year.append({"date": cursor.isoformat(), "level": logic.heat_level(done_count, due_count)})
+            cursor += timedelta(days=1)
+        payload["year"] = year
+        payload["moodEffects"] = self._mood_effects(user_id, habits, pair, today)
+
         if pair is not None:
             partner_id = pair.other(user_id)
             sync = logic.sync_rate(all_checkins, members, today)
@@ -728,6 +750,258 @@ class WebApi:
             raise ApiError("Список привычек изменился — обнови страницу", 409)
         self.db.reorder(ids, set(pinned))
         return web.json_response({"ok": True})
+
+    def _mood_effects(
+        self, user_id: int, habits: list[Habit], pair: Pair | None, today: date
+    ) -> list[dict[str, Any]]:
+        """How the user's mood (from the couple tracker) differs on days with each habit."""
+        couple = self.db.get_pair(user_id, "couple")
+        if couple is None or not couple.is_complete:
+            return []
+        since = today - timedelta(days=89)
+        moods = {d: scores[user_id] for d, scores in self.db.moods(couple.id, since).items() if user_id in scores}
+        if len(moods) < 6:
+            return []
+        effects = []
+        for habit in habits:
+            if habit.weekly_target:
+                continue
+            checkins = self.db.checkins(habit.id)
+            mine = {d for d, users in checkins.items() if user_id in users}
+            done = logic.avoid_clean_days(checkins, {user_id}, today, habit.created) if habit.is_avoid else mine
+            due = [
+                since + timedelta(days=i)
+                for i in range(90)
+                if logic.is_scheduled(habit.schedule, since + timedelta(days=i))
+                and (habit.created is None or since + timedelta(days=i) >= habit.created)
+            ]
+            effect = logic.mood_effect(moods, done, due)
+            if effect is None:
+                continue
+            diff, with_count, without_count = effect
+            effects.append(
+                {
+                    "emoji": habit.emoji,
+                    "title": habit.title,
+                    "kind": habit.kind,
+                    "diff": diff,
+                    "with": with_count,
+                    "without": without_count,
+                }
+            )
+        effects.sort(key=lambda e: -abs(e["diff"]))
+        return effects[:5]
+
+    # ---- focus, tasks, goals ----------------------------------------------------------
+
+    def _focus_payload(self, user_id: int) -> dict[str, Any]:
+        today = self.today()
+        session = self.db.active_focus(user_id)
+        if session is not None and session["habit_id"]:
+            habit = self.db.get_habit(int(session["habit_id"]))
+            session = {**session, "habit": f"{habit.emoji} {habit.title}" if habit else None}
+        return {
+            "active": session,
+            "now": datetime.now(self.tz).isoformat(),
+            "todayMinutes": self.db.focus_minutes(user_id, today, today),
+            "todaySessions": self.db.focus_count(user_id, today),
+            "weekMinutes": self.db.focus_minutes(user_id, logic.week_start(today), today),
+        }
+
+    async def _focus(self, request: web.Request) -> web.Response:
+        return web.json_response(self._focus_payload(request["user_id"]))
+
+    async def _focus_start(self, request: web.Request) -> web.Response:
+        user_id = request["user_id"]
+        data = await self._json(request)
+        minutes = data.get("minutes")
+        if not isinstance(minutes, int) or isinstance(minutes, bool) or not 1 <= minutes <= 120:
+            raise ApiError("Длительность — от 1 до 120 минут")
+        habit_id = data.get("habitId")
+        if habit_id is not None:
+            habit = self._owned_habit(user_id, habit_id)
+            if habit.is_avoid:
+                raise ApiError("Фокус можно привязать только к привычке «Делать»")
+            habit_id = habit.id
+        self.db.start_focus(user_id, minutes, datetime.now(self.tz), habit_id)
+        return web.json_response(self._focus_payload(user_id))
+
+    async def _focus_finish(self, request: web.Request) -> web.Response:
+        """complete: count the minutes and, if linked, mark the habit for today."""
+        user_id = request["user_id"]
+        session = self.db.get_focus(int(request.match_info["session_id"]))
+        if session is None or session["user_id"] != user_id or session["status"] != "running":
+            raise ApiError("Сессия не найдена", 404)
+        action = request.match_info["action"]
+        marked = None
+        if action == "cancel":
+            self.db.finish_focus(int(session["id"]), "cancelled")
+        else:
+            now = datetime.now(self.tz)
+            if datetime.fromisoformat(str(session["ends_at"])) - now > timedelta(seconds=30):
+                raise ApiError("Сессия ещё не закончилась")
+            self.db.finish_focus(int(session["id"]), "completed")
+            habit = self.db.get_habit(int(session["habit_id"])) if session["habit_id"] else None
+            if habit is not None and self.db.can_access(habit, user_id):
+                today = self.today()
+                before = user_id in self.db.checkins(habit.id).get(today, set())
+                if habit.is_amount:
+                    current = self.db.amounts(habit.id).get(today, {}).get(user_id, 0)
+                    add = int(session["minutes"]) if (habit.unit or "").startswith("мин") else (habit.step or 1)
+                    self.db.set_amount(habit, user_id, today, current + add)
+                elif not before:
+                    self.db.set_checkin(habit.id, user_id, today, True)
+                marked = f"{habit.emoji} {habit.title}"
+                now_done = user_id in self.db.checkins(habit.id).get(today, set())
+                if now_done and not before and habit.pair_id is not None and self.bot is not None:
+                    await self.handlers.notify_checkin(self.bot, habit, user_id, today)
+        return web.json_response({**self._focus_payload(user_id), "marked": marked})
+
+    def _own_task(self, user_id: int, task_id: Any) -> int:
+        tid = int(task_id)
+        if self.db.task_owner(tid) != user_id:
+            raise ApiError("Задача не найдена", 404)
+        return tid
+
+    async def _tasks(self, request: web.Request) -> web.Response:
+        user_id = request["user_id"]
+        today = self.today()
+        yesterday = self.db.tasks(user_id, today - timedelta(days=1))
+        return web.json_response(
+            {"tasks": self.db.tasks(user_id, today), "carryable": sum(1 for t in yesterday if not t["done"])}
+        )
+
+    async def _add_task(self, request: web.Request) -> web.Response:
+        user_id = request["user_id"]
+        data = await self._json(request)
+        if data.get("carry") is True:
+            today = self.today()
+            self.db.carry_over_tasks(user_id, today - timedelta(days=1), today)
+        else:
+            try:
+                self.db.add_task(user_id, self.today(), str(data.get("title", "")))
+            except ValueError as exc:
+                raise ApiError("Напиши задачу (максимум 5 в день)") from exc
+        return await self._tasks(request)
+
+    async def _toggle_task(self, request: web.Request) -> web.Response:
+        tid = self._own_task(request["user_id"], request.match_info["task_id"])
+        self.db.toggle_task(tid)
+        return await self._tasks(request)
+
+    async def _delete_task(self, request: web.Request) -> web.Response:
+        tid = self._own_task(request["user_id"], request.match_info["task_id"])
+        self.db.delete_task(tid)
+        return await self._tasks(request)
+
+    def _goal_payload(self, goal: dict[str, Any], user_id: int) -> dict[str, Any]:
+        today = self.today()
+        linked = []
+        for habit_id in self.db.goal_habit_ids(int(goal["id"])):
+            habit = self.db.get_habit(habit_id)
+            if habit is None or not self.db.can_access(habit, user_id):
+                continue
+            pair = self.db.get_pair_by_id(habit.pair_id) if habit.pair_id else None
+            members = pair.members if pair else frozenset({user_id})
+            real = logic.habit_done_days(habit.kind, self.db.checkins(habit.id), members, today, habit.created)
+            days = logic.with_freezes(habit.kind, real, self.db.freezes(habit.id), habit.weekly_target)
+            created = date.fromisoformat(str(goal["created"]))
+            window = max(1, min(30, (today - created).days + 1))
+            rate = logic.ratio(
+                *logic.completion(days, today, window, habit.schedule, habit.created, habit.kind, habit.weekly_target)
+            )
+            linked.append({"id": habit.id, "emoji": habit.emoji, "title": habit.title, "rate": rate})
+        target = goal["target"]
+        if target:
+            progress = max(0.0, min(1.0, float(goal["current"]) / float(target)))
+        else:
+            rates = [h["rate"] for h in linked if h["rate"] is not None]
+            progress = sum(rates) / len(rates) if rates else 0.0
+        deadline = goal["deadline"]
+        return {
+            "id": goal["id"],
+            "title": goal["title"],
+            "emoji": goal["emoji"],
+            "target": target,
+            "current": goal["current"],
+            "unit": goal["unit"],
+            "deadline": deadline,
+            "daysLeft": (date.fromisoformat(deadline) - today).days if deadline else None,
+            "done": goal["done"] or (bool(target) and float(goal["current"]) >= float(target)),
+            "progress": progress,
+            "habits": linked,
+        }
+
+    def _own_goal(self, user_id: int, goal_id: Any) -> dict[str, Any]:
+        goal = self.db.get_goal(int(goal_id))
+        if goal is None or goal["user_id"] != user_id:
+            raise ApiError("Цель не найдена", 404)
+        return goal
+
+    def _number(self, value: Any, name: str) -> float | None:
+        if value is None or value == "":
+            return None
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ApiError(f"{name}: нужно число")
+        return float(value)
+
+    def _goal_habits(self, user_id: int, ids: Any) -> list[int]:
+        if ids is None:
+            return []
+        if not isinstance(ids, list):
+            raise ApiError("Некорректный запрос")
+        return [self._owned_habit(user_id, i).id for i in ids]
+
+    async def _goals(self, request: web.Request) -> web.Response:
+        user_id = request["user_id"]
+        return web.json_response({"goals": [self._goal_payload(g, user_id) for g in self.db.goals(user_id)]})
+
+    async def _add_goal(self, request: web.Request) -> web.Response:
+        user_id = request["user_id"]
+        data = await self._json(request)
+        deadline = data.get("deadline") or None
+        try:
+            deadline_day = date.fromisoformat(deadline) if deadline else None
+        except (TypeError, ValueError) as exc:
+            raise ApiError("Некорректный срок") from exc
+        try:
+            self.db.add_goal(
+                user_id,
+                str(data.get("title", "")),
+                self.today(),
+                emoji=str(data.get("emoji", "🚀")),
+                target=self._number(data.get("target"), "Цель"),
+                unit=str(data.get("unit") or ""),
+                deadline=deadline_day,
+                habit_ids=self._goal_habits(user_id, data.get("habitIds")),
+            )
+        except ValueError as exc:
+            raise ApiError("Проверь название и число (максимум 10 целей)") from exc
+        return await self._goals(request)
+
+    async def _edit_goal(self, request: web.Request) -> web.Response:
+        user_id = request["user_id"]
+        goal = self._own_goal(user_id, request.match_info["goal_id"])
+        data = await self._json(request)
+        done = data.get("done")
+        if done is not None and not isinstance(done, bool):
+            raise ApiError("Некорректный запрос")
+        try:
+            self.db.update_goal(
+                int(goal["id"]),
+                current=self._number(data.get("current"), "Прогресс"),
+                done=done,
+                title=data.get("title") if isinstance(data.get("title"), str) else None,
+                habit_ids=self._goal_habits(user_id, data["habitIds"]) if "habitIds" in data else None,
+            )
+        except ValueError as exc:
+            raise ApiError("Некорректное значение") from exc
+        return await self._goals(request)
+
+    async def _delete_goal(self, request: web.Request) -> web.Response:
+        goal = self._own_goal(request["user_id"], request.match_info["goal_id"])
+        self.db.delete_goal(int(goal["id"]))
+        return await self._goals(request)
 
     # ---- notifications & export ----------------------------------------------------
 

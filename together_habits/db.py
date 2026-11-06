@@ -5,7 +5,7 @@ from __future__ import annotations
 import secrets
 import sqlite3
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 PAIR_KINDS = ("friend", "couple")
@@ -119,6 +119,40 @@ CREATE TABLE IF NOT EXISTS reactions (
     emoji TEXT NOT NULL,
     PRIMARY KEY (habit_id, from_id, day)
 );
+CREATE TABLE IF NOT EXISTS tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    day TEXT NOT NULL,
+    title TEXT NOT NULL,
+    done INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS tasks_user_day ON tasks (user_id, day);
+CREATE TABLE IF NOT EXISTS focus_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    habit_id INTEGER REFERENCES habits(id) ON DELETE SET NULL,
+    minutes INTEGER NOT NULL,
+    started_at TEXT NOT NULL,
+    ends_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'completed', 'cancelled'))
+);
+CREATE TABLE IF NOT EXISTS goals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    title TEXT NOT NULL,
+    emoji TEXT NOT NULL,
+    target REAL,
+    current REAL NOT NULL DEFAULT 0,
+    unit TEXT,
+    deadline TEXT,
+    created TEXT NOT NULL,
+    done INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS goal_habits (
+    goal_id INTEGER NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+    habit_id INTEGER NOT NULL REFERENCES habits(id) ON DELETE CASCADE,
+    PRIMARY KEY (goal_id, habit_id)
+);
 CREATE TABLE IF NOT EXISTS plans (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     pair_id INTEGER NOT NULL REFERENCES pairs(id) ON DELETE CASCADE,
@@ -151,6 +185,8 @@ CREATE TABLE IF NOT EXISTS moods (
 
 
 FREEZES_PER_MONTH = 2
+MAX_TASKS_PER_DAY = 5
+MAX_GOALS = 10
 MAX_NOTE_LENGTH = 300
 
 
@@ -1132,3 +1168,207 @@ class Storage:
             "SELECT from_id, emoji FROM reactions WHERE habit_id = ? AND day = ?", (habit_id, day.isoformat())
         )
         return {r["from_id"]: r["emoji"] for r in rows}
+
+    # ---- top tasks of the day -----------------------------------------------------
+
+    def tasks(self, user_id: int, day: date) -> list[dict[str, object]]:
+        rows = self.conn.execute(
+            "SELECT id, title, done FROM tasks WHERE user_id = ? AND day = ? ORDER BY id",
+            (user_id, day.isoformat()),
+        )
+        return [{"id": r["id"], "title": r["title"], "done": bool(r["done"])} for r in rows]
+
+    def add_task(self, user_id: int, day: date, title: str) -> int:
+        title = title.strip()[:80]
+        if not title:
+            raise ValueError("task title is empty")
+        if len(self.tasks(user_id, day)) >= MAX_TASKS_PER_DAY:
+            raise ValueError("too many tasks")
+        cur = self.conn.execute(
+            "INSERT INTO tasks (user_id, day, title) VALUES (?, ?, ?)", (user_id, day.isoformat(), title)
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def task_owner(self, task_id: int) -> int | None:
+        row = self.conn.execute("SELECT user_id FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        return row["user_id"] if row else None
+
+    def toggle_task(self, task_id: int) -> bool:
+        self.conn.execute("UPDATE tasks SET done = 1 - done WHERE id = ?", (task_id,))
+        self.conn.commit()
+        row = self.conn.execute("SELECT done FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        return bool(row["done"])
+
+    def delete_task(self, task_id: int) -> None:
+        self.conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+        self.conn.commit()
+
+    def carry_over_tasks(self, user_id: int, from_day: date, to_day: date) -> int:
+        """Copy yesterday's unfinished tasks to today (up to the daily limit)."""
+        existing = {t["title"] for t in self.tasks(user_id, to_day)}
+        added = 0
+        for task in self.tasks(user_id, from_day):
+            if task["done"] or task["title"] in existing:
+                continue
+            try:
+                self.add_task(user_id, to_day, str(task["title"]))
+            except ValueError:
+                break
+            added += 1
+        return added
+
+    # ---- focus (pomodoro) sessions --------------------------------------------------
+
+    @staticmethod
+    def _focus(row: sqlite3.Row) -> dict[str, object]:
+        return {
+            "id": row["id"],
+            "user_id": row["user_id"],
+            "habit_id": row["habit_id"],
+            "minutes": row["minutes"],
+            "started_at": row["started_at"],
+            "ends_at": row["ends_at"],
+            "status": row["status"],
+        }
+
+    def start_focus(self, user_id: int, minutes: int, now: datetime, habit_id: int | None = None) -> int:
+        if not 1 <= minutes <= 180:
+            raise ValueError("minutes must be 1..180")
+        with self.conn:
+            self.conn.execute(
+                "UPDATE focus_sessions SET status = 'cancelled' WHERE user_id = ? AND status = 'running'",
+                (user_id,),
+            )
+            cur = self.conn.execute(
+                "INSERT INTO focus_sessions (user_id, habit_id, minutes, started_at, ends_at) VALUES (?, ?, ?, ?, ?)",
+                (user_id, habit_id, minutes, now.isoformat(), (now + timedelta(minutes=minutes)).isoformat()),
+            )
+        return cur.lastrowid
+
+    def get_focus(self, session_id: int) -> dict[str, object] | None:
+        row = self.conn.execute("SELECT * FROM focus_sessions WHERE id = ?", (session_id,)).fetchone()
+        return self._focus(row) if row else None
+
+    def active_focus(self, user_id: int) -> dict[str, object] | None:
+        row = self.conn.execute(
+            "SELECT * FROM focus_sessions WHERE user_id = ? AND status = 'running' ORDER BY id DESC LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        return self._focus(row) if row else None
+
+    def finish_focus(self, session_id: int, status: str) -> None:
+        if status not in ("completed", "cancelled"):
+            raise ValueError("bad status")
+        self.conn.execute("UPDATE focus_sessions SET status = ? WHERE id = ?", (status, session_id))
+        self.conn.commit()
+
+    def due_focus_sessions(self, now: datetime) -> list[dict[str, object]]:
+        """Running sessions whose time is up (the scheduler pings the user once)."""
+        rows = self.conn.execute("SELECT * FROM focus_sessions WHERE status = 'running'")
+        return [
+            self._focus(r) for r in rows if datetime.fromisoformat(r["ends_at"]) <= now
+        ]
+
+    def focus_minutes(self, user_id: int, first: date, last: date) -> int:
+        rows = self.conn.execute(
+            "SELECT minutes, started_at FROM focus_sessions WHERE user_id = ? AND status = 'completed'",
+            (user_id,),
+        )
+        return sum(
+            r["minutes"] for r in rows if first <= datetime.fromisoformat(r["started_at"]).date() <= last
+        )
+
+    def focus_count(self, user_id: int, day: date) -> int:
+        rows = self.conn.execute(
+            "SELECT started_at FROM focus_sessions WHERE user_id = ? AND status = 'completed'", (user_id,)
+        )
+        return sum(1 for r in rows if datetime.fromisoformat(r["started_at"]).date() == day)
+
+    # ---- goals (month / quarter) -------------------------------------------------------
+
+    @staticmethod
+    def _goal(row: sqlite3.Row) -> dict[str, object]:
+        return {
+            "id": row["id"],
+            "user_id": row["user_id"],
+            "title": row["title"],
+            "emoji": row["emoji"],
+            "target": row["target"],
+            "current": row["current"],
+            "unit": row["unit"],
+            "deadline": row["deadline"],
+            "created": row["created"],
+            "done": bool(row["done"]),
+        }
+
+    def add_goal(
+        self,
+        user_id: int,
+        title: str,
+        created: date,
+        *,
+        emoji: str = "🚀",
+        target: float | None = None,
+        unit: str | None = None,
+        deadline: date | None = None,
+        habit_ids: list[int] | None = None,
+    ) -> int:
+        title = title.strip()[:60]
+        if not title:
+            raise ValueError("goal title is empty")
+        if target is not None and not 0 < target <= 1e9:
+            raise ValueError("target must be positive")
+        if len(self.goals(user_id)) >= MAX_GOALS:
+            raise ValueError("too many goals")
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO goals (user_id, title, emoji, target, unit, deadline, created) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (user_id, title, emoji.strip()[:8] or "🚀", target, (unit or "").strip()[:12] or None,
+                 deadline.isoformat() if deadline else None, created.isoformat()),
+            )
+            for habit_id in habit_ids or []:
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO goal_habits (goal_id, habit_id) VALUES (?, ?)", (cur.lastrowid, habit_id)
+                )
+        return cur.lastrowid
+
+    def goals(self, user_id: int) -> list[dict[str, object]]:
+        rows = self.conn.execute(
+            "SELECT * FROM goals WHERE user_id = ? ORDER BY done, COALESCE(deadline, '9999'), id", (user_id,)
+        )
+        return [self._goal(r) for r in rows]
+
+    def get_goal(self, goal_id: int) -> dict[str, object] | None:
+        row = self.conn.execute("SELECT * FROM goals WHERE id = ?", (goal_id,)).fetchone()
+        return self._goal(row) if row else None
+
+    def goal_habit_ids(self, goal_id: int) -> list[int]:
+        rows = self.conn.execute("SELECT habit_id FROM goal_habits WHERE goal_id = ?", (goal_id,))
+        return [r["habit_id"] for r in rows]
+
+    def update_goal(
+        self, goal_id: int, *, current: float | None = None, done: bool | None = None,
+        title: str | None = None, habit_ids: list[int] | None = None,
+    ) -> None:
+        with self.conn:
+            if current is not None:
+                if not -1e9 <= current <= 1e9:
+                    raise ValueError("bad value")
+                self.conn.execute("UPDATE goals SET current = ? WHERE id = ?", (current, goal_id))
+            if done is not None:
+                self.conn.execute("UPDATE goals SET done = ? WHERE id = ?", (int(done), goal_id))
+            if title is not None:
+                if not title.strip():
+                    raise ValueError("goal title is empty")
+                self.conn.execute("UPDATE goals SET title = ? WHERE id = ?", (title.strip()[:60], goal_id))
+            if habit_ids is not None:
+                self.conn.execute("DELETE FROM goal_habits WHERE goal_id = ?", (goal_id,))
+                for habit_id in habit_ids:
+                    self.conn.execute(
+                        "INSERT OR IGNORE INTO goal_habits (goal_id, habit_id) VALUES (?, ?)", (goal_id, habit_id)
+                    )
+
+    def delete_goal(self, goal_id: int) -> None:
+        self.conn.execute("DELETE FROM goals WHERE id = ?", (goal_id,))
+        self.conn.commit()

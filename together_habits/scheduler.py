@@ -195,8 +195,6 @@ class Scheduler:
         await self.handlers.finalize_challenges(bot, now.date())
 
     async def focus_sessions(self, bot: Any, now: datetime) -> None:
-        if not hasattr(self.db, "due_focus_sessions"):
-            return
         for session in self.db.due_focus_sessions(now):
             if self.db.mark_sent(f"focus:{session['id']}"):
                 await self.handlers.send(

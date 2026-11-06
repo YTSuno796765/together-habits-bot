@@ -425,6 +425,39 @@ def completion_between(
     return done, due
 
 
+# ---- analytics -----------------------------------------------------------------------
+
+
+def mood_effect(
+    moods: Mapping[date, int],
+    done_days: set[date],
+    due: Iterable[date],
+    min_samples: int = 3,
+) -> tuple[float, int, int] | None:
+    """Average mood on due days with the habit done minus days without it.
+
+    Returns (difference, samples_with, samples_without) or None if there is too little data.
+    """
+    with_habit: list[int] = []
+    without: list[int] = []
+    for day in due:
+        if day not in moods:
+            continue
+        (with_habit if day in done_days else without).append(moods[day])
+    if len(with_habit) < min_samples or len(without) < min_samples:
+        return None
+    diff = sum(with_habit) / len(with_habit) - sum(without) / len(without)
+    return round(diff, 1), len(with_habit), len(without)
+
+
+def heat_level(done: int, due: int) -> int:
+    """0 (nothing due / nothing done) .. 4 (everything done) for the year heatmap."""
+    if not due or not done:
+        return 0
+    share = done / due
+    return 4 if share >= 1 else 3 if share >= 0.66 else 2 if share >= 0.33 else 1
+
+
 def ratio(done: int, total: int) -> float | None:
     return done / total if total else None
 

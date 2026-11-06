@@ -70,7 +70,7 @@ def morning_digest(handlers: Handlers, user_id: int, today: date) -> str | None:
         place = sorted(members, key=lambda u: -scores[u]).index(user_id) + 1
         challenges.append(f"{challenge.emoji} {escape(challenge.title)} — {place}-е место из {len(members)}")
 
-    tasks = [t for t in db.tasks(user_id, today) if not t["done"]] if hasattr(db, "tasks") else []
+    tasks = [t for t in db.tasks(user_id, today) if not t["done"]]
 
     if not (lines or plans or challenges or tasks):
         return None
@@ -150,7 +150,7 @@ def weekly_report(handlers: Handlers, user_id: int, today: date) -> str | None:
         text.append(f"\n🏆 Лучше всего: {best[1]} — {logic.percent(best[0])}")
     if worst and best and worst[1] != best[1] and worst[0] < 1:
         text.append(f"🔧 Подтянуть: {worst[1]} — {logic.percent(worst[0])}")
-    focus = db.focus_minutes(user_id, today - timedelta(days=6), today) if hasattr(db, "focus_minutes") else 0
+    focus = db.focus_minutes(user_id, logic.week_start(today), today)
     if focus:
         text.append(f"⏱ Фокус за неделю: {focus // 60} ч {focus % 60} мин")
     text.append("\nНовая неделя — новые серии 🔥")
